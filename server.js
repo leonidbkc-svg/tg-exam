@@ -201,7 +201,7 @@ async function pollLoop() {
 // --- API ---
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ если sid потерялся — создаём новый (fallback)
+// ✅ sid fallback если открылось без ?sid=...
 app.post("/api/new-session", (req, res) => {
   const sid = newSid();
   sessions.set(sid, {
@@ -235,6 +235,7 @@ app.post("/api/event", async (req, res) => {
     const p = payload || {};
     s.events.push({ type, payload: p, ts: when });
 
+    // старт
     if (type === "start" && p?.fio) {
       s.fio = String(p.fio).trim().slice(0, 120);
       s.startedAt = Date.now();
@@ -244,31 +245,31 @@ app.post("/api/event", async (req, res) => {
       return res.json({ ok: true });
     }
 
+    // уходы (детали)
     if (type === "blur") s.blurCount = Number(p?.blurCount ?? (s.blurCount + 1));
     if (type === "hidden") s.hiddenCount = Number(p?.hiddenCount ?? (s.hiddenCount + 1));
 
-    // ✅ главный счётчик уходов приходит с клиента (после нормализации)
+    // ✅ leaveCount обновляем ТОЛЬКО если пришёл от клиента
+    // иначе НЕ пересчитываем как blur+hidden (чтобы не было "нечестно")
     if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
       s.leaveCount = Number(p.leaveCount);
-    } else {
-      s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
     }
 
     sessions.set(sid, s);
 
-    if (type === "blur" || type === "hidden") {
+    if (type === "hidden") {
       const fio = s.fio || "ФИО не введено";
-      const kind = type;
       const leaves = Number(s.leaveCount || 0);
       const status = leaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
 
       await sendAdmin(
-        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: ${kind}\nуходов: ${leaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
+        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: hidden\nуходов: ${leaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
       );
 
       return res.json({ ok: true, shouldFinish: leaves >= 3 });
     }
 
+    // blur только логируем (без shouldFinish и без спама админу)
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ ok: false, error: "server_error" });
@@ -292,9 +293,7 @@ app.post("/api/submit", async (req, res) => {
     if (fio) s.fio = String(fio).trim().slice(0, 120);
     if (Number.isFinite(Number(blurCount))) s.blurCount = Number(blurCount);
     if (Number.isFinite(Number(hiddenCount))) s.hiddenCount = Number(hiddenCount);
-
     if (Number.isFinite(Number(leaveCount))) s.leaveCount = Number(leaveCount);
-    else s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
 
     s.score = Number(score ?? 0);
     s.total = Number(total ?? 0);

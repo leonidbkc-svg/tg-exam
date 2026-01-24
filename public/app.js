@@ -11,7 +11,7 @@ let blurCount = 0;
 let hiddenCount = 0;
 let leaveCount = 0;
 
-let isHiddenCycle = false; // ✅ один "цикл ухода"
+let isHiddenCycle = false; // один цикл "ушёл -> вернулся"
 let startedAt = 0;
 
 let timeLeft = TEST_DURATION_SEC;
@@ -66,21 +66,19 @@ function formatTime(sec) {
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
-/* ✅ модал вместо alert */
+/* модал вместо alert */
 function showModal(title, text, btnText = "Понятно") {
   $("modalTitle").textContent = title;
   $("modalText").textContent = text;
   $("modalBtn").textContent = btnText;
   $("modalBackdrop").style.display = "flex";
 }
-
 function hideModal() {
   $("modalBackdrop").style.display = "none";
 }
-
 $("modalBtn").addEventListener("click", hideModal);
 
-/* ✅ плашка предупреждения */
+/* предупреждение */
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
@@ -90,34 +88,33 @@ function showWarning(title, subtitle = "", ms = 2200) {
   warnTimer = setTimeout(() => (box.style.display = "none"), ms);
 }
 
-// Надёжная отправка
-function sendJSON(url, data) {
-  try {
-    const body = JSON.stringify(data);
-    if (navigator.sendBeacon) {
-      const blob = new Blob([body], { type: "application/json" });
-      const ok = navigator.sendBeacon(url, blob);
-      if (ok) return Promise.resolve({ ok: true, beacon: true });
-    }
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-      keepalive: true
-    }).then(r => r.json()).catch(() => ({ ok: false }));
-  } catch {
-    return Promise.resolve({ ok: false });
+/**
+ * ✅ Универсальная отправка
+ * beacon=true полезен для событий (когда ответ не нужен)
+ * beacon=false обязателен для /api/new-session (нужен sid в ответе)
+ */
+function postJSON(url, data, { beacon = true } = {}) {
+  const body = JSON.stringify(data ?? {});
+  if (beacon && navigator.sendBeacon) {
+    const blob = new Blob([body], { type: "application/json" });
+    const ok = navigator.sendBeacon(url, blob);
+    if (ok) return Promise.resolve({ ok: true, beacon: true });
   }
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true
+  }).then(r => r.json()).catch(() => ({ ok: false }));
 }
 
 async function postEvent(type, payload) {
   if (!sid) return { ok: false };
-  return sendJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() });
+  return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
 }
 
-/* ✅ если sid потерялся — создаём новый */
+/* ✅ sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
 async function ensureSid() {
-  // 1) URL
   const fromUrl = getSidFromUrl();
   if (fromUrl) {
     sid = fromUrl;
@@ -125,20 +122,18 @@ async function ensureSid() {
     return sid;
   }
 
-  // 2) sessionStorage
   const stored = (sessionStorage.getItem("sid") || "").trim();
   if (stored) {
     sid = stored;
     return sid;
   }
 
-  // 3) сервер
-  const resp = await sendJSON("/api/new-session", {});
+  // Важно: beacon=false, иначе sid не получим!
+  const resp = await postJSON("/api/new-session", {}, { beacon: false });
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
     sessionStorage.setItem("sid", sid);
-    // подсказка (не ошибка!)
-    showWarning("ℹ️ Сеанс создан заново", "Откройте из бота — будет стабильнее");
+    showWarning("ℹ️ Сеанс создан заново", "Лучше открывать через кнопку в боте");
     return sid;
   }
 
@@ -225,33 +220,30 @@ function startTimer() {
     $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
   }, 1000);
 }
-
 function stopTimer() {
   if (timerId) clearInterval(timerId);
   timerId = null;
 }
 
-/* ✅ один уход = один leaveCount */
-async function registerLeave(kind) {
+/* ✅ Считаем уход ТОЛЬКО по hidden */
+async function registerHiddenLeave() {
   if (!testStarted || finished) return;
 
-  // детальные счётчики (для админа)
-  if (kind === "blur") blurCount += 1;
-  if (kind === "hidden") hiddenCount += 1;
-
-  // главный счётчик
+  hiddenCount += 1;
   leaveCount += 1;
 
-  const resp = await postEvent(kind, {
-    fio,
-    blurCount,
-    hiddenCount,
-    leaveCount
-  });
+  const resp = await postEvent("hidden", { fio, blurCount, hiddenCount, leaveCount });
 
   if (leaveCount >= AUTO_FINISH_AT || resp?.shouldFinish) {
     await finishTest({ reason: "too_many_violations" });
   }
+}
+
+/* blur не считается как попытка — только лог */
+async function logBlurOnly() {
+  if (!testStarted || finished) return;
+  blurCount += 1;
+  await postEvent("blur", { fio, blurCount, hiddenCount, leaveCount });
 }
 
 async function startTest() {
@@ -301,11 +293,11 @@ async function finishTest({ reason = "manual" } = {}) {
 
   disableAllInputs();
 
-  await sendJSON("/api/submit", {
+  await postJSON("/api/submit", {
     sid, fio, score, total, reason,
     blurCount, hiddenCount, leaveCount,
     spentSec
-  });
+  }, { beacon: false });
 
   const text =
     reason === "too_many_violations"
@@ -314,7 +306,6 @@ async function finishTest({ reason = "manual" } = {}) {
         ? `Время вышло.\nРезультат: ${score}/${total}`
         : `Тест завершён.\nРезультат: ${score}/${total}`;
 
-  // ✅ вместо alert
   showModal("Готово", text, "Ок");
 
   $("note").textContent = `Ваш результат: ${score}/${total}`;
@@ -322,37 +313,29 @@ async function finishTest({ reason = "manual" } = {}) {
   $("closeBtn").style.display = "block";
 }
 
-/* ✅ Логика событий:
-   - уход считаем по hidden (один раз за цикл)
-   - blur игнорируем, если уже hidden (чтобы не было 2 попыток за одно сворачивание)
-*/
+/* ✅ события */
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
   if (document.hidden) {
     if (!isHiddenCycle) {
       isHiddenCycle = true;
-      registerLeave("hidden");
+      registerHiddenLeave();
     }
   } else {
     if (isHiddenCycle) {
-      showWarning("⚠️ Возврат в тест зафиксирован", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
       isHiddenCycle = false;
+      showWarning("⚠️ Возврат в тест зафиксирован", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
     }
   }
 });
 
+// blur не увеличивает попытки
 window.addEventListener("blur", () => {
   if (!testStarted || finished) return;
-  // ✅ если уже hidden — не считаем blur вторым уходом
+  // чтобы не спамить blur, если уже hidden
   if (document.hidden || isHiddenCycle) return;
-  registerLeave("blur");
-});
-
-window.addEventListener("focus", () => {
-  if (!testStarted || finished) return;
-  // просто уведомление при возвращении фокуса
-  showWarning("ℹ️ Проверка фокуса", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`, 1400);
+  logBlurOnly();
 });
 
 $("startBtn").addEventListener("click", startTest);
