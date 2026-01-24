@@ -3,16 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
   <title>Тест по ИСМП</title>
 
-  <!-- Telegram WebApp -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -23,24 +19,36 @@
     }
 
     .card {
-      max-width: 480px;
+      max-width: 560px;
       margin: 0 auto;
-      background: #ffffff;
+      background: #fff;
       border-radius: 16px;
       padding: 20px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.06);
     }
 
-    h1 {
-      margin-top: 0;
-      font-size: 22px;
+    h1 { margin: 0 0 14px 0; font-size: 22px; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
     }
 
-    label {
-      display: block;
-      margin-bottom: 6px;
-      font-weight: 500;
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #f1f1f4;
+      font-size: 14px;
+      color: #333;
+      white-space: nowrap;
     }
+
+    label { display: block; margin: 10px 0 6px; font-weight: 500; }
 
     input[type="text"] {
       width: 100%;
@@ -48,15 +56,14 @@
       font-size: 16px;
       border-radius: 10px;
       border: 1px solid #d0d0d0;
-      background: #ffffff;
-      color: #111111;
+      background: #fff;
+      color: #111;
       caret-color: #007aff;
     }
-
     input[type="text"]:focus {
       outline: none;
       border-color: #007aff;
-      box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.2);
+      box-shadow: 0 0 0 2px rgba(0,122,255,0.2);
     }
 
     button {
@@ -68,41 +75,53 @@
       border-radius: 12px;
       border: none;
       background: #007aff;
-      color: #ffffff;
+      color: #fff;
     }
-
-    button:active {
-      opacity: 0.85;
+    button.secondary {
+      background: #e9e9ee;
+      color: #111;
+      font-weight: 600;
     }
+    button:active { opacity: 0.88; }
 
     .hint {
       margin-top: 12px;
       font-size: 13px;
       color: #666;
+      line-height: 1.35;
     }
 
-    .question {
-      margin-top: 20px;
+    .q {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #eee;
+    }
+
+    .q-title {
+      font-weight: 700;
+      margin-bottom: 10px;
+      line-height: 1.25;
     }
 
     .answers label {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
+      gap: 10px;
       padding: 12px;
-      margin-bottom: 10px;
-      border: 1px solid #e0e0e0;
+      margin: 10px 0;
+      border: 1px solid #e2e2e7;
       border-radius: 12px;
       cursor: pointer;
+      user-select: none;
     }
 
-    .answers input {
-      margin-right: 10px;
-    }
+    .answers input { margin-top: 2px; }
 
-    .counter {
-      margin-top: 8px;
-      font-size: 13px;
-      color: #888;
+    .muted {
+      font-size: 12px;
+      color: #777;
+      margin-top: 10px;
+      line-height: 1.35;
     }
   </style>
 </head>
@@ -112,46 +131,28 @@
     <h1>Тест по ИСМП</h1>
 
     <label for="fio">ФИО</label>
-    <input
-      id="fio"
-      type="text"
-      placeholder="Иванов Иван Иванович"
-      autocomplete="name"
-    />
+    <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
 
-    <button onclick="startTest()">Начать тест</button>
+    <button id="startBtn">Начать тест</button>
 
     <p class="hint">
-      ⚠️ Сворачивания и переключения фиксируются и передаются экзаменатору
+      ⚠️ Экзаменационный режим: сворачивания/переключения фиксируются и отправляются экзаменатору.<br>
+      При 3-м уходе тест завершится автоматически.
     </p>
   </div>
 
   <div class="card" id="testScreen" style="display:none;">
-    <div class="counter" id="violations">Уходы: blur=0, hidden=0</div>
-
-    <div class="question">
-      <strong>1. ИСМП — это…</strong>
-      <div class="answers">
-        <label>
-          <input type="radio" name="q1" value="1">
-          инфекции, связанные с оказанием медицинской помощи
-        </label>
-        <label>
-          <input type="radio" name="q1" value="0">
-          инфекции, передающиеся половым путём
-        </label>
-        <label>
-          <input type="radio" name="q1" value="0">
-          инфекции пищевого происхождения
-        </label>
-        <label>
-          <input type="radio" name="q1" value="0">
-          внутрибольничные аллергии
-        </label>
-      </div>
+    <div class="row">
+      <div class="pill" id="timerPill">⏱ 05:00</div>
+      <div class="pill">ИСМП • 5 вопросов</div>
     </div>
 
-    <button onclick="finishTest()">Завершить тест</button>
+    <div id="questions"></div>
+
+    <button id="finishBtn">Завершить тест</button>
+    <button class="secondary" id="closeBtn" style="display:none;">Закрыть</button>
+
+    <div class="muted" id="note"></div>
   </div>
 
   <script src="app.js"></script>

@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // число строкой, например "215609496"
+const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // строкой
 const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
@@ -64,7 +64,6 @@ function newSid() {
 }
 
 function makeWebAppUrl(sid) {
-  // мини-апп открывается по домену, sid передаём как query param
   return `${APP_URL}/?sid=${encodeURIComponent(sid)}`;
 }
 
@@ -82,7 +81,6 @@ let offset = 0;
 let polling = false;
 
 async function handleUpdate(update) {
-  // messages
   if (update.message) {
     const msg = update.message;
     const chatId = msg.chat.id;
@@ -107,7 +105,8 @@ async function handleUpdate(update) {
         text:
           "Привет! Это тест по ИСМП.\n\n" +
           "Нажми кнопку ниже, введи ФИО и проходи тест.\n" +
-          "⚠️ Сворачивания/переключения фиксируются.",
+          "⚠️ Сворачивания/переключения фиксируются.\n" +
+          "🚫 На 3-м уходе тест завершится автоматически.",
         reply_markup: buildStartKeyboard(sid)
       });
       return;
@@ -125,7 +124,8 @@ async function handleUpdate(update) {
       const lines = last.map((s) => {
         const fio = s.fio || "—";
         const score = (s.score != null) ? `${s.score}/${s.total ?? "?"}` : "—";
-        return `• ${fio} | sid=${s.sid.slice(0, 6)}… | blur=${s.blurCount} hidden=${s.hiddenCount} | score=${score}`;
+        const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
+        return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${totalLeaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score}`;
       });
 
       await tg("sendMessage", {
@@ -136,7 +136,6 @@ async function handleUpdate(update) {
     }
   }
 
-  // callback_query (кнопки)
   if (update.callback_query) {
     const cq = update.callback_query;
     const chatId = cq.message?.chat?.id;
@@ -212,33 +211,43 @@ app.post("/api/event", async (req, res) => {
       events: []
     };
 
-    s.events.push({ type, payload: payload || {}, ts: ts || Date.now() });
+    const when = ts || Date.now();
+    const p = payload || {};
+    s.events.push({ type, payload: p, ts: when });
 
-    if (type === "start" && payload?.fio) {
-      s.fio = String(payload.fio).trim().slice(0, 120);
+    // старт
+    if (type === "start" && p?.fio) {
+      s.fio = String(p.fio).trim().slice(0, 120);
       s.startedAt = Date.now();
+
+      sessions.set(sid, s);
+
+      await sendAdmin(
+        `✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n(тест начат)`
+      );
+
+      return res.json({ ok: true });
     }
 
-    if (type === "blur") s.blurCount = Number(payload?.blurCount ?? (s.blurCount + 1));
-    if (type === "hidden") s.hiddenCount = Number(payload?.hiddenCount ?? (s.hiddenCount + 1));
+    // уходы
+    if (type === "blur") s.blurCount = Number(p?.blurCount ?? (s.blurCount + 1));
+    if (type === "hidden") s.hiddenCount = Number(p?.hiddenCount ?? (s.hiddenCount + 1));
+
+    const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
 
     sessions.set(sid, s);
 
-    // Уведомления админу: только на уходы + порог
     if (type === "blur" || type === "hidden") {
       const fio = s.fio || "ФИО не введено";
-      const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
+      const kind = type === "blur" ? "blur" : "hidden";
+      const status = totalLeaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
 
-      // пороги можно менять
-      const warnAt = 2;   // начиная с 2 — предупреждать
-      const stopAt = 4;   // начиная с 4 — жёстко пометить
+      await sendAdmin(
+        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: ${kind}\nуходов: ${totalLeaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
+      );
 
-      if (totalLeaves >= warnAt) {
-        const status = totalLeaves >= stopAt ? "🚫 МНОГО УХОДОВ" : "⚠️ возможное списывание";
-        await sendAdmin(
-          `${status}\nФИО: ${fio}\nsid: ${sid}\nblur: ${s.blurCount}, hidden: ${s.hiddenCount}`
-        );
-      }
+      // страховка: скажем клиенту завершить тест
+      return res.json({ ok: true, shouldFinish: totalLeaves >= 3 });
     }
 
     return res.json({ ok: true });
@@ -249,11 +258,21 @@ app.post("/api/event", async (req, res) => {
 
 app.post("/api/submit", async (req, res) => {
   try {
-    const { sid, fio, score, total } = req.body || {};
+    const { sid, fio, score, total, reason, blurCount, hiddenCount, spentSec } = req.body || {};
     if (!sid) return res.status(400).json({ ok: false });
 
-    const s = sessions.get(sid) || { sid, createdAt: Date.now(), events: [], blurCount: 0, hiddenCount: 0 };
+    const s = sessions.get(sid) || {
+      sid,
+      createdAt: Date.now(),
+      events: [],
+      blurCount: 0,
+      hiddenCount: 0
+    };
+
     if (fio) s.fio = String(fio).trim().slice(0, 120);
+    if (Number.isFinite(Number(blurCount))) s.blurCount = Number(blurCount);
+    if (Number.isFinite(Number(hiddenCount))) s.hiddenCount = Number(hiddenCount);
+
     s.score = Number(score ?? 0);
     s.total = Number(total ?? 0);
     s.finishedAt = Date.now();
@@ -261,8 +280,22 @@ app.post("/api/submit", async (req, res) => {
     sessions.set(sid, s);
 
     const fioText = s.fio || "ФИО не введено";
+    const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
+
+    const reasonMap = {
+      manual: "завершил вручную",
+      time_up: "время вышло",
+      too_many_violations: "авто-завершение (3-й уход)"
+    };
+
     await sendAdmin(
-      `✅ Тест завершён\nФИО: ${fioText}\nРезультат: ${s.score}/${s.total}\nblur: ${s.blurCount}, hidden: ${s.hiddenCount}\nsid: ${sid}`
+      `🏁 Тест завершён\n` +
+      `ФИО: ${fioText}\n` +
+      `Результат: ${s.score}/${s.total}\n` +
+      `Причина: ${reasonMap[reason] || (reason || "manual")}\n` +
+      `Уходов: ${totalLeaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})\n` +
+      (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
+      `sid: ${sid}`
     );
 
     return res.json({ ok: true });
@@ -274,6 +307,5 @@ app.post("/api/submit", async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server started on :${PORT}`);
   console.log(`APP_URL=${APP_URL}`);
-  // запускаем polling
   pollLoop();
 });
