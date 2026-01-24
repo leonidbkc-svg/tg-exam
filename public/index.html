@@ -1,57 +1,159 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ИСМП — тест</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Тест по ИСМП</title>
+
+  <!-- Telegram WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; }
-    .card { max-width: 720px; margin: 0 auto; border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
-    h1 { font-size: 20px; margin: 0 0 12px; }
-    input { width: 100%; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 10px; }
-    button { padding: 10px 12px; font-size: 16px; border: 0; border-radius: 10px; cursor: pointer; }
-    .row { display: flex; gap: 10px; margin-top: 12px; }
-    .muted { color: #666; font-size: 13px; margin-top: 8px; }
-    .q { margin-top: 14px; }
-    .opt { display: block; margin: 8px 0; padding: 10px; border: 1px solid #ddd; border-radius: 10px; cursor: pointer; }
-    .opt input { width: auto; margin-right: 8px; }
-    .hidden { display: none; }
-    .ok { color: #0a7; }
-    .warn { color: #c60; }
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f2f2f7;
+      color: #111;
+    }
+
+    .card {
+      max-width: 480px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 22px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 12px 14px;
+      font-size: 16px;
+      border-radius: 10px;
+      border: 1px solid #d0d0d0;
+      background: #ffffff;
+      color: #111111;
+      caret-color: #007aff;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #007aff;
+      box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.2);
+    }
+
+    button {
+      margin-top: 16px;
+      width: 100%;
+      padding: 14px;
+      font-size: 17px;
+      font-weight: 600;
+      border-radius: 12px;
+      border: none;
+      background: #007aff;
+      color: #ffffff;
+    }
+
+    button:active {
+      opacity: 0.85;
+    }
+
+    .hint {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #666;
+    }
+
+    .question {
+      margin-top: 20px;
+    }
+
+    .answers label {
+      display: flex;
+      align-items: center;
+      padding: 12px;
+      margin-bottom: 10px;
+      border: 1px solid #e0e0e0;
+      border-radius: 12px;
+      cursor: pointer;
+    }
+
+    .answers input {
+      margin-right: 10px;
+    }
+
+    .counter {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #888;
+    }
   </style>
 </head>
 <body>
-  <div class="card">
+
+  <div class="card" id="startScreen">
     <h1>Тест по ИСМП</h1>
 
-    <div id="step-fio">
-      <label>ФИО</label>
-      <input id="fio" placeholder="Иванов Иван Иванович" />
-      <div class="row">
-        <button id="btnStart">Начать</button>
-      </div>
-      <div class="muted">
-        ⚠️ Сворачивания/переключения фиксируются (как событие). Полностью запретить их на телефоне нельзя, но мы считаем уходы.
-      </div>
-      <div id="sidInfo" class="muted"></div>
-    </div>
+    <label for="fio">ФИО</label>
+    <input
+      id="fio"
+      type="text"
+      placeholder="Иванов Иван Иванович"
+      autocomplete="name"
+    />
 
-    <div id="step-test" class="hidden">
-      <div class="muted" id="leaveInfo"></div>
-      <div id="questions"></div>
-      <div class="row">
-        <button id="btnFinish">Завершить</button>
-      </div>
-      <div class="muted warn" id="hint"></div>
-    </div>
+    <button onclick="startTest()">Начать тест</button>
 
-    <div id="step-result" class="hidden">
-      <h2 id="resultTitle"></h2>
-      <div id="resultText"></div>
-      <div class="muted">Можно закрыть окно.</div>
-    </div>
+    <p class="hint">
+      ⚠️ Сворачивания и переключения фиксируются и передаются экзаменатору
+    </p>
   </div>
 
-  <script src="./app.js"></script>
+  <div class="card" id="testScreen" style="display:none;">
+    <div class="counter" id="violations">Уходы: blur=0, hidden=0</div>
+
+    <div class="question">
+      <strong>1. ИСМП — это…</strong>
+      <div class="answers">
+        <label>
+          <input type="radio" name="q1" value="1">
+          инфекции, связанные с оказанием медицинской помощи
+        </label>
+        <label>
+          <input type="radio" name="q1" value="0">
+          инфекции, передающиеся половым путём
+        </label>
+        <label>
+          <input type="radio" name="q1" value="0">
+          инфекции пищевого происхождения
+        </label>
+        <label>
+          <input type="radio" name="q1" value="0">
+          внутрибольничные аллергии
+        </label>
+      </div>
+    </div>
+
+    <button onclick="finishTest()">Завершить тест</button>
+  </div>
+
+  <script src="app.js"></script>
 </body>
 </html>
