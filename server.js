@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
-import { fetch } from "undici";
+import fetch from "node-fetch";
 
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
