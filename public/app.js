@@ -1,8 +1,8 @@
 const tg = window.Telegram?.WebApp;
 tg?.expand?.();
 
-const TEST_DURATION_SEC = 5 * 60;     // 5 минут
-const AUTO_FINISH_AT = 3;             // на 3-й уход автозавершение
+const TEST_DURATION_SEC = 5 * 60; // 5 минут
+const AUTO_FINISH_AT = 3;         // на 3-й уход автозавершение
 
 let sid = "";
 let fio = "";
@@ -17,61 +17,36 @@ let testStarted = false;
 let finished = false;
 
 const questions = [
-  {
-    id: "q1",
-    type: "single",
-    text: "ИСМП — это…",
-    options: [
-      { id: "a", text: "инфекции, связанные с оказанием медицинской помощи", correct: true },
-      { id: "b", text: "инфекции, передающиеся половым путём", correct: false },
-      { id: "c", text: "инфекции пищевого происхождения", correct: false },
-      { id: "d", text: "внутрибольничные аллергии", correct: false }
-    ]
-  },
-  {
-    id: "q2",
-    type: "single",
-    text: "Главная цель профилактики ИСМП — это…",
-    options: [
-      { id: "a", text: "снижение риска инфицирования пациентов и персонала", correct: true },
-      { id: "b", text: "увеличение количества процедур", correct: false },
-      { id: "c", text: "ускорение выписки пациентов", correct: false },
-      { id: "d", text: "уменьшение затрат на питание", correct: false }
-    ]
-  },
-  {
-    id: "q3",
-    type: "single",
-    text: "Наиболее эффективная мера профилактики ИСМП в повседневной практике — это…",
-    options: [
-      { id: "a", text: "ношение перчаток всегда и везде", correct: false },
-      { id: "b", text: "гигиена рук по показаниям", correct: true },
-      { id: "c", text: "проветривание палат каждые 2 часа", correct: false },
-      { id: "d", text: "приём витаминов персоналом", correct: false }
-    ]
-  },
-  {
-    id: "q4",
-    type: "single",
-    text: "К контактному пути передачи ИСМП относится…",
-    options: [
-      { id: "a", text: "укус насекомого", correct: false },
-      { id: "b", text: "передача через руки/поверхности/инструменты при нарушении режима", correct: true },
-      { id: "c", text: "только воздушно-капельная передача", correct: false },
-      { id: "d", text: "передача через пищу при любой инфекции", correct: false }
-    ]
-  },
-  {
-    id: "q5",
-    type: "multi",
-    text: "Выберите НЕСКОЛЬКО мер профилактики ИСМП (несколько правильных):",
-    options: [
-      { id: "a", text: "гигиена рук", correct: true },
-      { id: "b", text: "стерилизация/дезинфекция инструментов по режимам", correct: true },
-      { id: "c", text: "использование СИЗ по показаниям", correct: true },
-      { id: "d", text: "отмена уборки для экономии времени", correct: false }
-    ]
-  }
+  { id: "q1", type: "single", text: "ИСМП — это…", options: [
+    { id: "a", text: "инфекции, связанные с оказанием медицинской помощи", correct: true },
+    { id: "b", text: "инфекции, передающиеся половым путём", correct: false },
+    { id: "c", text: "инфекции пищевого происхождения", correct: false },
+    { id: "d", text: "внутрибольничные аллергии", correct: false },
+  ]},
+  { id: "q2", type: "single", text: "Главная цель профилактики ИСМП — это…", options: [
+    { id: "a", text: "снижение риска инфицирования пациентов и персонала", correct: true },
+    { id: "b", text: "увеличение количества процедур", correct: false },
+    { id: "c", text: "ускорение выписки пациентов", correct: false },
+    { id: "d", text: "уменьшение затрат на питание", correct: false },
+  ]},
+  { id: "q3", type: "single", text: "Наиболее эффективная мера профилактики ИСМП — это…", options: [
+    { id: "a", text: "ношение перчаток всегда и везде", correct: false },
+    { id: "b", text: "гигиена рук по показаниям", correct: true },
+    { id: "c", text: "проветривание палат каждые 2 часа", correct: false },
+    { id: "d", text: "приём витаминов персоналом", correct: false },
+  ]},
+  { id: "q4", type: "single", text: "К контактному пути передачи ИСМП относится…", options: [
+    { id: "a", text: "укус насекомого", correct: false },
+    { id: "b", text: "передача через руки/поверхности/инструменты при нарушении режима", correct: true },
+    { id: "c", text: "только воздушно-капельная передача", correct: false },
+    { id: "d", text: "передача через пищу при любой инфекции", correct: false },
+  ]},
+  { id: "q5", type: "multi", text: "Выберите НЕСКОЛЬКО мер профилактики ИСМП (несколько правильных):", options: [
+    { id: "a", text: "гигиена рук", correct: true },
+    { id: "b", text: "стерилизация/дезинфекция инструментов по режимам", correct: true },
+    { id: "c", text: "использование СИЗ по показаниям", correct: true },
+    { id: "d", text: "отмена уборки для экономии времени", correct: false },
+  ]},
 ];
 
 function $(id) { return document.getElementById(id); }
@@ -87,7 +62,22 @@ function formatTime(sec) {
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
-// Надёжная отправка событий: beacon (когда сворачивают/уходят) + fallback fetch
+// ✅ Плашка предупреждения
+let warnTimer = null;
+function showWarning(title, subtitle = "", ms = 2200) {
+  const box = $("warnBox");
+  if (!box) return;
+
+  box.innerHTML = `${title}${subtitle ? `<small>${subtitle}</small>` : ""}`;
+  box.style.display = "block";
+
+  if (warnTimer) clearTimeout(warnTimer);
+  warnTimer = setTimeout(() => {
+    box.style.display = "none";
+  }, ms);
+}
+
+// Надёжная отправка: beacon + fallback fetch
 function sendJSON(url, data) {
   try {
     const body = JSON.stringify(data);
@@ -160,7 +150,6 @@ function getAnswersMap() {
 
 function calcScore(answersMap) {
   let score = 0;
-
   questions.forEach(q => {
     const correctIds = q.options.filter(o => o.correct).map(o => o.id).sort();
     const userIds = (answersMap[q.id] || []).slice().sort();
@@ -168,20 +157,16 @@ function calcScore(answersMap) {
     if (q.type === "single") {
       if (userIds.length === 1 && correctIds.length === 1 && userIds[0] === correctIds[0]) score += 1;
     } else {
-      // multi: 1 балл только если совпало ТОЧНО множество ответов
       if (userIds.length === correctIds.length && userIds.every((v, i) => v === correctIds[i])) score += 1;
     }
   });
-
   return score;
 }
 
 function startTimer() {
   $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
-
   timerId = setInterval(() => {
     if (finished) return;
-
     timeLeft -= 1;
     if (timeLeft <= 0) {
       timeLeft = 0;
@@ -200,16 +185,11 @@ function stopTimer() {
 
 async function postEvent(type, payload) {
   if (!sid) return { ok: false };
-  return sendJSON("/api/event", {
-    sid,
-    type,
-    payload: payload || {},
-    ts: Date.now()
-  });
+  return sendJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() });
 }
 
 function totalLeaves() {
-  return (blurCount + hiddenCount);
+  return blurCount + hiddenCount;
 }
 
 async function registerViolation(kind) {
@@ -218,30 +198,22 @@ async function registerViolation(kind) {
   if (kind === "blur") blurCount += 1;
   if (kind === "hidden") hiddenCount += 1;
 
-  // отправляем событие на сервер (админу придёт уведомление)
-  const resp = await postEvent(kind, {
-    fio,
-    blurCount,
-    hiddenCount,
-    totalLeaves: totalLeaves()
-  });
+  const leaves = totalLeaves();
 
-  // авто завершение на 3-й уход
-  if (totalLeaves() >= AUTO_FINISH_AT || resp?.shouldFinish) {
+  // ✅ показываем предупреждение студенту при возвращении
+  // (сам показ делаем на focus/visibilitychange ниже, а здесь можно подсказать лимит)
+  // отправляем событие на сервер
+  const resp = await postEvent(kind, { fio, blurCount, hiddenCount, totalLeaves: leaves });
+
+  if (leaves >= AUTO_FINISH_AT || resp?.shouldFinish) {
     await finishTest({ reason: "too_many_violations" });
   }
 }
 
 async function startTest() {
   fio = $("fio").value.trim();
-  if (!fio) {
-    alert("Введите ФИО");
-    return;
-  }
-  if (!sid) {
-    alert("Ошибка: не найден sid в ссылке. Откройте тест через кнопку в боте.");
-    return;
-  }
+  if (!fio) return alert("Введите ФИО");
+  if (!sid) return alert("Ошибка: не найден sid. Откройте тест через кнопку в боте.");
 
   $("startScreen").style.display = "none";
   $("testScreen").style.display = "block";
@@ -257,7 +229,6 @@ async function startTest() {
   renderQuestions();
   startTimer();
 
-  // событие старта/регистрации (админу придёт уведомление)
   await postEvent("start", { fio });
 
   $("note").textContent = "Не закрывайте приложение до завершения теста.";
@@ -283,16 +254,9 @@ async function finishTest({ reason = "manual" } = {}) {
 
   disableAllInputs();
 
-  // отправляем результат (админу придёт уведомление: кто завершил и на сколько баллов)
   await sendJSON("/api/submit", {
-    sid,
-    fio,
-    score,
-    total,
-    reason,
-    blurCount,
-    hiddenCount,
-    spentSec
+    sid, fio, score, total, reason,
+    blurCount, hiddenCount, spentSec
   });
 
   const msg =
@@ -309,19 +273,33 @@ async function finishTest({ reason = "manual" } = {}) {
   $("closeBtn").style.display = "block";
 }
 
+// ✅ Фиксация ухода
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
-  if (document.hidden) registerViolation("hidden");
+
+  if (document.hidden) {
+    registerViolation("hidden");
+  } else {
+    // ✅ вернулся
+    const left = totalLeaves();
+    showWarning("⚠️ Возврат в тест зафиксирован", `Осталось попыток: ${Math.max(0, (AUTO_FINISH_AT - left))}`);
+  }
 });
 
+// ✅ blur — уход; focus — возвращение
 window.addEventListener("blur", () => {
   if (!testStarted || finished) return;
   registerViolation("blur");
+});
+
+window.addEventListener("focus", () => {
+  if (!testStarted || finished) return;
+  const left = totalLeaves();
+  showWarning("⚠️ Возврат в тест зафиксирован", `Осталось попыток: ${Math.max(0, (AUTO_FINISH_AT - left))}`);
 });
 
 $("startBtn").addEventListener("click", startTest);
 $("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
 $("closeBtn").addEventListener("click", () => tg?.close?.());
 
-// init
 sid = getSidFromUrl();
