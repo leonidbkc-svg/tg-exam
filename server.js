@@ -4,7 +4,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 
-
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // строкой
 const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
@@ -28,7 +27,7 @@ app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] })
  *   sid, createdAt,
  *   tgUserId, tgChatId,
  *   fio,
- *   blurCount, hiddenCount,
+ *   blurCount, hiddenCount, leaveCount,
  *   startedAt, finishedAt,
  *   score, total,
  *   events: [{type, payload, ts}]
@@ -99,6 +98,7 @@ async function handleUpdate(update) {
         fio: null,
         blurCount: 0,
         hiddenCount: 0,
+        leaveCount: 0,
         events: []
       });
 
@@ -126,8 +126,11 @@ async function handleUpdate(update) {
       const lines = last.map((s) => {
         const fio = s.fio || "—";
         const score = (s.score != null) ? `${s.score}/${s.total ?? "?"}` : "—";
-        const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
-        return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${totalLeaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score}`;
+        const leaves = Number.isFinite(Number(s.leaveCount))
+          ? Number(s.leaveCount)
+          : ((s.blurCount || 0) + (s.hiddenCount || 0));
+
+        return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${leaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score}`;
       });
 
       await tg("sendMessage", {
@@ -156,6 +159,7 @@ async function handleUpdate(update) {
         fio: null,
         blurCount: 0,
         hiddenCount: 0,
+        leaveCount: 0,
         events: []
       });
 
@@ -210,6 +214,7 @@ app.post("/api/event", async (req, res) => {
       fio: null,
       blurCount: 0,
       hiddenCount: 0,
+      leaveCount: 0,
       events: []
     };
 
@@ -221,35 +226,39 @@ app.post("/api/event", async (req, res) => {
     if (type === "start" && p?.fio) {
       s.fio = String(p.fio).trim().slice(0, 120);
       s.startedAt = Date.now();
-
       sessions.set(sid, s);
 
-      await sendAdmin(
-        `✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n(тест начат)`
-      );
-
+      await sendAdmin(`✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n(тест начат)`);
       return res.json({ ok: true });
     }
 
-    // уходы
+    // уходы (детали)
     if (type === "blur") s.blurCount = Number(p?.blurCount ?? (s.blurCount + 1));
     if (type === "hidden") s.hiddenCount = Number(p?.hiddenCount ?? (s.hiddenCount + 1));
 
-    const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
+    // ✅ единый счётчик уходов (после дебаунса на клиенте)
+    if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
+      s.leaveCount = Number(p.leaveCount);
+    } else {
+      // fallback (если клиент ещё старый)
+      s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
+    }
 
     sessions.set(sid, s);
 
     if (type === "blur" || type === "hidden") {
       const fio = s.fio || "ФИО не введено";
       const kind = type === "blur" ? "blur" : "hidden";
-      const status = totalLeaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
+      const leaves = Number(s.leaveCount || 0);
+
+      const status = leaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
 
       await sendAdmin(
-        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: ${kind}\nуходов: ${totalLeaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
+        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: ${kind}\nуходов: ${leaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
       );
 
       // страховка: скажем клиенту завершить тест
-      return res.json({ ok: true, shouldFinish: totalLeaves >= 3 });
+      return res.json({ ok: true, shouldFinish: leaves >= 3 });
     }
 
     return res.json({ ok: true });
@@ -260,7 +269,7 @@ app.post("/api/event", async (req, res) => {
 
 app.post("/api/submit", async (req, res) => {
   try {
-    const { sid, fio, score, total, reason, blurCount, hiddenCount, spentSec } = req.body || {};
+    const { sid, fio, score, total, reason, blurCount, hiddenCount, leaveCount, spentSec } = req.body || {};
     if (!sid) return res.status(400).json({ ok: false });
 
     const s = sessions.get(sid) || {
@@ -268,21 +277,25 @@ app.post("/api/submit", async (req, res) => {
       createdAt: Date.now(),
       events: [],
       blurCount: 0,
-      hiddenCount: 0
+      hiddenCount: 0,
+      leaveCount: 0
     };
 
     if (fio) s.fio = String(fio).trim().slice(0, 120);
     if (Number.isFinite(Number(blurCount))) s.blurCount = Number(blurCount);
     if (Number.isFinite(Number(hiddenCount))) s.hiddenCount = Number(hiddenCount);
 
+    // ✅ финальный leaveCount
+    if (Number.isFinite(Number(leaveCount))) s.leaveCount = Number(leaveCount);
+    else s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
+
     s.score = Number(score ?? 0);
     s.total = Number(total ?? 0);
     s.finishedAt = Date.now();
-
     sessions.set(sid, s);
 
     const fioText = s.fio || "ФИО не введено";
-    const totalLeaves = (s.blurCount || 0) + (s.hiddenCount || 0);
+    const leaves = Number(s.leaveCount || 0);
 
     const reasonMap = {
       manual: "завершил вручную",
@@ -295,7 +308,7 @@ app.post("/api/submit", async (req, res) => {
       `ФИО: ${fioText}\n` +
       `Результат: ${s.score}/${s.total}\n` +
       `Причина: ${reasonMap[reason] || (reason || "manual")}\n` +
-      `Уходов: ${totalLeaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})\n` +
+      `Уходов: ${leaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})\n` +
       (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
       `sid: ${sid}`
     );

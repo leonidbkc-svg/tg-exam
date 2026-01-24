@@ -4,12 +4,18 @@ tg?.expand?.();
 const TEST_DURATION_SEC = 5 * 60; // 5 минут
 const AUTO_FINISH_AT = 3;         // на 3-й уход автозавершение
 
+const LEAVE_DEBOUNCE_MS = 900;    // чтобы blur+hidden не считались двумя уходами
+
 let sid = "";
 let fio = "";
+
 let blurCount = 0;
 let hiddenCount = 0;
-let startedAt = 0;
+let leaveCount = 0;              // ✅ единый счетчик уходов
 
+let lastLeaveAt = 0;
+
+let startedAt = 0;
 let timeLeft = TEST_DURATION_SEC;
 let timerId = null;
 
@@ -62,19 +68,15 @@ function formatTime(sec) {
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
-// ✅ Плашка предупреждения
+// ✅ плашка предупреждения
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
   if (!box) return;
-
   box.innerHTML = `${title}${subtitle ? `<small>${subtitle}</small>` : ""}`;
   box.style.display = "block";
-
   if (warnTimer) clearTimeout(warnTimer);
-  warnTimer = setTimeout(() => {
-    box.style.display = "none";
-  }, ms);
+  warnTimer = setTimeout(() => (box.style.display = "none"), ms);
 }
 
 // Надёжная отправка: beacon + fallback fetch
@@ -97,10 +99,14 @@ function sendJSON(url, data) {
   }
 }
 
+async function postEvent(type, payload) {
+  if (!sid) return { ok: false };
+  return sendJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() });
+}
+
 function renderQuestions() {
   const root = $("questions");
   root.innerHTML = "";
-
   questions.forEach((q, idx) => {
     const block = document.createElement("div");
     block.className = "q";
@@ -153,9 +159,8 @@ function calcScore(answersMap) {
   questions.forEach(q => {
     const correctIds = q.options.filter(o => o.correct).map(o => o.id).sort();
     const userIds = (answersMap[q.id] || []).slice().sort();
-
     if (q.type === "single") {
-      if (userIds.length === 1 && correctIds.length === 1 && userIds[0] === correctIds[0]) score += 1;
+      if (userIds.length === 1 && userIds[0] === correctIds[0]) score += 1;
     } else {
       if (userIds.length === correctIds.length && userIds.every((v, i) => v === correctIds[i])) score += 1;
     }
@@ -183,29 +188,26 @@ function stopTimer() {
   timerId = null;
 }
 
-async function postEvent(type, payload) {
-  if (!sid) return { ok: false };
-  return sendJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() });
-}
-
-function totalLeaves() {
-  return blurCount + hiddenCount;
-}
-
-async function registerViolation(kind) {
+// ✅ Главное: считать уход ОДИН раз
+async function registerLeave(kind) {
   if (!testStarted || finished) return;
+
+  const now = Date.now();
+  if (now - lastLeaveAt < LEAVE_DEBOUNCE_MS) return; // игнорируем "двойной" триггер
+  lastLeaveAt = now;
 
   if (kind === "blur") blurCount += 1;
   if (kind === "hidden") hiddenCount += 1;
+  leaveCount += 1;
 
-  const leaves = totalLeaves();
+  await postEvent(kind, {
+    fio,
+    blurCount,
+    hiddenCount,
+    leaveCount
+  });
 
-  // ✅ показываем предупреждение студенту при возвращении
-  // (сам показ делаем на focus/visibilitychange ниже, а здесь можно подсказать лимит)
-  // отправляем событие на сервер
-  const resp = await postEvent(kind, { fio, blurCount, hiddenCount, totalLeaves: leaves });
-
-  if (leaves >= AUTO_FINISH_AT || resp?.shouldFinish) {
+  if (leaveCount >= AUTO_FINISH_AT) {
     await finishTest({ reason: "too_many_violations" });
   }
 }
@@ -220,8 +222,10 @@ async function startTest() {
 
   blurCount = 0;
   hiddenCount = 0;
-  timeLeft = TEST_DURATION_SEC;
+  leaveCount = 0;
+  lastLeaveAt = 0;
 
+  timeLeft = TEST_DURATION_SEC;
   testStarted = true;
   finished = false;
   startedAt = Date.now();
@@ -230,7 +234,6 @@ async function startTest() {
   startTimer();
 
   await postEvent("start", { fio });
-
   $("note").textContent = "Не закрывайте приложение до завершения теста.";
 }
 
@@ -256,7 +259,9 @@ async function finishTest({ reason = "manual" } = {}) {
 
   await sendJSON("/api/submit", {
     sid, fio, score, total, reason,
-    blurCount, hiddenCount, spentSec
+    blurCount, hiddenCount,
+    leaveCount,
+    spentSec
   });
 
   const msg =
@@ -273,29 +278,27 @@ async function finishTest({ reason = "manual" } = {}) {
   $("closeBtn").style.display = "block";
 }
 
-// ✅ Фиксация ухода
+// ✅ Уход/возврат + предупреждение
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
   if (document.hidden) {
-    registerViolation("hidden");
+    registerLeave("hidden");
   } else {
-    // ✅ вернулся
-    const left = totalLeaves();
-    showWarning("⚠️ Возврат в тест зафиксирован", `Осталось попыток: ${Math.max(0, (AUTO_FINISH_AT - left))}`);
+    showWarning("⚠️ Возврат в тест зафиксирован",
+      `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
   }
 });
 
-// ✅ blur — уход; focus — возвращение
 window.addEventListener("blur", () => {
   if (!testStarted || finished) return;
-  registerViolation("blur");
+  registerLeave("blur");
 });
 
 window.addEventListener("focus", () => {
   if (!testStarted || finished) return;
-  const left = totalLeaves();
-  showWarning("⚠️ Возврат в тест зафиксирован", `Осталось попыток: ${Math.max(0, (AUTO_FINISH_AT - left))}`);
+  showWarning("⚠️ Возврат в тест зафиксирован",
+    `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
 });
 
 $("startBtn").addEventListener("click", startTest);
