@@ -22,8 +22,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
 
 /**
- * In-memory сессии:
- * sid -> {
+ * sessions: sid -> {
  *   sid, createdAt,
  *   tgUserId, tgChatId,
  *   fio,
@@ -35,7 +34,7 @@ app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] })
  */
 const sessions = new Map();
 
-// --- Telegram helpers (без библиотек) ---
+// --- Telegram helpers ---
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 async function tg(method, payload) {
@@ -77,7 +76,7 @@ function buildStartKeyboard(sid) {
   };
 }
 
-// --- Simple long polling loop ---
+// --- polling ---
 let offset = 0;
 let polling = false;
 
@@ -119,6 +118,7 @@ async function handleUpdate(update) {
         await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
         return;
       }
+
       const last = Array.from(sessions.values())
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         .slice(0, 10);
@@ -129,7 +129,6 @@ async function handleUpdate(update) {
         const leaves = Number.isFinite(Number(s.leaveCount))
           ? Number(s.leaveCount)
           : ((s.blurCount || 0) + (s.hiddenCount || 0));
-
         return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${leaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score}`;
       });
 
@@ -146,7 +145,6 @@ async function handleUpdate(update) {
     const chatId = cq.message?.chat?.id;
     const userId = cq.from?.id;
     const data = cq.data;
-
     if (!chatId) return;
 
     if (data === "NEW_SESSION") {
@@ -200,8 +198,23 @@ async function pollLoop() {
   }
 }
 
-// --- API for mini app ---
+// --- API ---
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ✅ если sid потерялся — создаём новый (fallback)
+app.post("/api/new-session", (req, res) => {
+  const sid = newSid();
+  sessions.set(sid, {
+    sid,
+    createdAt: Date.now(),
+    fio: null,
+    blurCount: 0,
+    hiddenCount: 0,
+    leaveCount: 0,
+    events: []
+  });
+  return res.json({ ok: true, sid });
+});
 
 app.post("/api/event", async (req, res) => {
   try {
@@ -222,7 +235,6 @@ app.post("/api/event", async (req, res) => {
     const p = payload || {};
     s.events.push({ type, payload: p, ts: when });
 
-    // старт
     if (type === "start" && p?.fio) {
       s.fio = String(p.fio).trim().slice(0, 120);
       s.startedAt = Date.now();
@@ -232,15 +244,13 @@ app.post("/api/event", async (req, res) => {
       return res.json({ ok: true });
     }
 
-    // уходы (детали)
     if (type === "blur") s.blurCount = Number(p?.blurCount ?? (s.blurCount + 1));
     if (type === "hidden") s.hiddenCount = Number(p?.hiddenCount ?? (s.hiddenCount + 1));
 
-    // ✅ единый счётчик уходов (после дебаунса на клиенте)
+    // ✅ главный счётчик уходов приходит с клиента (после нормализации)
     if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
       s.leaveCount = Number(p.leaveCount);
     } else {
-      // fallback (если клиент ещё старый)
       s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
     }
 
@@ -248,21 +258,19 @@ app.post("/api/event", async (req, res) => {
 
     if (type === "blur" || type === "hidden") {
       const fio = s.fio || "ФИО не введено";
-      const kind = type === "blur" ? "blur" : "hidden";
+      const kind = type;
       const leaves = Number(s.leaveCount || 0);
-
       const status = leaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
 
       await sendAdmin(
         `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: ${kind}\nуходов: ${leaves} (blur=${s.blurCount}, hidden=${s.hiddenCount})`
       );
 
-      // страховка: скажем клиенту завершить тест
       return res.json({ ok: true, shouldFinish: leaves >= 3 });
     }
 
     return res.json({ ok: true });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ ok: false, error: "server_error" });
   }
 });
@@ -285,7 +293,6 @@ app.post("/api/submit", async (req, res) => {
     if (Number.isFinite(Number(blurCount))) s.blurCount = Number(blurCount);
     if (Number.isFinite(Number(hiddenCount))) s.hiddenCount = Number(hiddenCount);
 
-    // ✅ финальный leaveCount
     if (Number.isFinite(Number(leaveCount))) s.leaveCount = Number(leaveCount);
     else s.leaveCount = (s.blurCount || 0) + (s.hiddenCount || 0);
 
@@ -314,7 +321,7 @@ app.post("/api/submit", async (req, res) => {
     );
 
     return res.json({ ok: true });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ ok: false });
   }
 });

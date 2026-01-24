@@ -1,21 +1,19 @@
 const tg = window.Telegram?.WebApp;
 tg?.expand?.();
 
-const TEST_DURATION_SEC = 5 * 60; // 5 минут
-const AUTO_FINISH_AT = 3;         // на 3-й уход автозавершение
-
-const LEAVE_DEBOUNCE_MS = 900;    // чтобы blur+hidden не считались двумя уходами
+const TEST_DURATION_SEC = 5 * 60;
+const AUTO_FINISH_AT = 3;
 
 let sid = "";
 let fio = "";
 
 let blurCount = 0;
 let hiddenCount = 0;
-let leaveCount = 0;              // ✅ единый счетчик уходов
+let leaveCount = 0;
 
-let lastLeaveAt = 0;
-
+let isHiddenCycle = false; // ✅ один "цикл ухода"
 let startedAt = 0;
+
 let timeLeft = TEST_DURATION_SEC;
 let timerId = null;
 
@@ -27,32 +25,32 @@ const questions = [
     { id: "a", text: "инфекции, связанные с оказанием медицинской помощи", correct: true },
     { id: "b", text: "инфекции, передающиеся половым путём", correct: false },
     { id: "c", text: "инфекции пищевого происхождения", correct: false },
-    { id: "d", text: "внутрибольничные аллергии", correct: false },
+    { id: "d", text: "внутрибольничные аллергии", correct: false }
   ]},
   { id: "q2", type: "single", text: "Главная цель профилактики ИСМП — это…", options: [
     { id: "a", text: "снижение риска инфицирования пациентов и персонала", correct: true },
     { id: "b", text: "увеличение количества процедур", correct: false },
     { id: "c", text: "ускорение выписки пациентов", correct: false },
-    { id: "d", text: "уменьшение затрат на питание", correct: false },
+    { id: "d", text: "уменьшение затрат на питание", correct: false }
   ]},
   { id: "q3", type: "single", text: "Наиболее эффективная мера профилактики ИСМП — это…", options: [
     { id: "a", text: "ношение перчаток всегда и везде", correct: false },
     { id: "b", text: "гигиена рук по показаниям", correct: true },
     { id: "c", text: "проветривание палат каждые 2 часа", correct: false },
-    { id: "d", text: "приём витаминов персоналом", correct: false },
+    { id: "d", text: "приём витаминов персоналом", correct: false }
   ]},
   { id: "q4", type: "single", text: "К контактному пути передачи ИСМП относится…", options: [
     { id: "a", text: "укус насекомого", correct: false },
     { id: "b", text: "передача через руки/поверхности/инструменты при нарушении режима", correct: true },
     { id: "c", text: "только воздушно-капельная передача", correct: false },
-    { id: "d", text: "передача через пищу при любой инфекции", correct: false },
+    { id: "d", text: "передача через пищу при любой инфекции", correct: false }
   ]},
   { id: "q5", type: "multi", text: "Выберите НЕСКОЛЬКО мер профилактики ИСМП (несколько правильных):", options: [
     { id: "a", text: "гигиена рук", correct: true },
     { id: "b", text: "стерилизация/дезинфекция инструментов по режимам", correct: true },
     { id: "c", text: "использование СИЗ по показаниям", correct: true },
-    { id: "d", text: "отмена уборки для экономии времени", correct: false },
-  ]},
+    { id: "d", text: "отмена уборки для экономии времени", correct: false }
+  ]}
 ];
 
 function $(id) { return document.getElementById(id); }
@@ -68,18 +66,31 @@ function formatTime(sec) {
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
-// ✅ плашка предупреждения
+/* ✅ модал вместо alert */
+function showModal(title, text, btnText = "Понятно") {
+  $("modalTitle").textContent = title;
+  $("modalText").textContent = text;
+  $("modalBtn").textContent = btnText;
+  $("modalBackdrop").style.display = "flex";
+}
+
+function hideModal() {
+  $("modalBackdrop").style.display = "none";
+}
+
+$("modalBtn").addEventListener("click", hideModal);
+
+/* ✅ плашка предупреждения */
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
-  if (!box) return;
   box.innerHTML = `${title}${subtitle ? `<small>${subtitle}</small>` : ""}`;
   box.style.display = "block";
   if (warnTimer) clearTimeout(warnTimer);
   warnTimer = setTimeout(() => (box.style.display = "none"), ms);
 }
 
-// Надёжная отправка: beacon + fallback fetch
+// Надёжная отправка
 function sendJSON(url, data) {
   try {
     const body = JSON.stringify(data);
@@ -104,9 +115,40 @@ async function postEvent(type, payload) {
   return sendJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() });
 }
 
+/* ✅ если sid потерялся — создаём новый */
+async function ensureSid() {
+  // 1) URL
+  const fromUrl = getSidFromUrl();
+  if (fromUrl) {
+    sid = fromUrl;
+    sessionStorage.setItem("sid", sid);
+    return sid;
+  }
+
+  // 2) sessionStorage
+  const stored = (sessionStorage.getItem("sid") || "").trim();
+  if (stored) {
+    sid = stored;
+    return sid;
+  }
+
+  // 3) сервер
+  const resp = await sendJSON("/api/new-session", {});
+  if (resp?.ok && resp.sid) {
+    sid = String(resp.sid);
+    sessionStorage.setItem("sid", sid);
+    // подсказка (не ошибка!)
+    showWarning("ℹ️ Сеанс создан заново", "Откройте из бота — будет стабильнее");
+    return sid;
+  }
+
+  return "";
+}
+
 function renderQuestions() {
   const root = $("questions");
   root.innerHTML = "";
+
   questions.forEach((q, idx) => {
     const block = document.createElement("div");
     block.className = "q";
@@ -159,8 +201,9 @@ function calcScore(answersMap) {
   questions.forEach(q => {
     const correctIds = q.options.filter(o => o.correct).map(o => o.id).sort();
     const userIds = (answersMap[q.id] || []).slice().sort();
+
     if (q.type === "single") {
-      if (userIds.length === 1 && userIds[0] === correctIds[0]) score += 1;
+      if (userIds.length === 1 && correctIds.length === 1 && userIds[0] === correctIds[0]) score += 1;
     } else {
       if (userIds.length === correctIds.length && userIds.every((v, i) => v === correctIds[i])) score += 1;
     }
@@ -188,34 +231,35 @@ function stopTimer() {
   timerId = null;
 }
 
-// ✅ Главное: считать уход ОДИН раз
+/* ✅ один уход = один leaveCount */
 async function registerLeave(kind) {
   if (!testStarted || finished) return;
 
-  const now = Date.now();
-  if (now - lastLeaveAt < LEAVE_DEBOUNCE_MS) return; // игнорируем "двойной" триггер
-  lastLeaveAt = now;
-
+  // детальные счётчики (для админа)
   if (kind === "blur") blurCount += 1;
   if (kind === "hidden") hiddenCount += 1;
+
+  // главный счётчик
   leaveCount += 1;
 
-  await postEvent(kind, {
+  const resp = await postEvent(kind, {
     fio,
     blurCount,
     hiddenCount,
     leaveCount
   });
 
-  if (leaveCount >= AUTO_FINISH_AT) {
+  if (leaveCount >= AUTO_FINISH_AT || resp?.shouldFinish) {
     await finishTest({ reason: "too_many_violations" });
   }
 }
 
 async function startTest() {
   fio = $("fio").value.trim();
-  if (!fio) return alert("Введите ФИО");
-  if (!sid) return alert("Ошибка: не найден sid. Откройте тест через кнопку в боте.");
+  if (!fio) return showModal("Ошибка", "Введите ФИО");
+
+  await ensureSid();
+  if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
 
   $("startScreen").style.display = "none";
   $("testScreen").style.display = "block";
@@ -223,7 +267,7 @@ async function startTest() {
   blurCount = 0;
   hiddenCount = 0;
   leaveCount = 0;
-  lastLeaveAt = 0;
+  isHiddenCycle = false;
 
   timeLeft = TEST_DURATION_SEC;
   testStarted = true;
@@ -239,7 +283,7 @@ async function startTest() {
 
 function disableAllInputs() {
   document.querySelectorAll("input, button").forEach(el => {
-    if (el.id === "closeBtn") return;
+    if (el.id === "closeBtn" || el.id === "modalBtn") return;
     el.disabled = true;
   });
 }
@@ -259,50 +303,63 @@ async function finishTest({ reason = "manual" } = {}) {
 
   await sendJSON("/api/submit", {
     sid, fio, score, total, reason,
-    blurCount, hiddenCount,
-    leaveCount,
+    blurCount, hiddenCount, leaveCount,
     spentSec
   });
 
-  const msg =
+  const text =
     reason === "too_many_violations"
-      ? `Тест завершён автоматически (3-й уход).\nВаш результат: ${score}/${total}`
+      ? `Тест завершён автоматически (3-й уход).\nРезультат: ${score}/${total}`
       : reason === "time_up"
-        ? `Время вышло.\nВаш результат: ${score}/${total}`
-        : `Тест завершён.\nВаш результат: ${score}/${total}`;
+        ? `Время вышло.\nРезультат: ${score}/${total}`
+        : `Тест завершён.\nРезультат: ${score}/${total}`;
 
-  alert(msg);
+  // ✅ вместо alert
+  showModal("Готово", text, "Ок");
 
   $("note").textContent = `Ваш результат: ${score}/${total}`;
   $("finishBtn").style.display = "none";
   $("closeBtn").style.display = "block";
 }
 
-// ✅ Уход/возврат + предупреждение
+/* ✅ Логика событий:
+   - уход считаем по hidden (один раз за цикл)
+   - blur игнорируем, если уже hidden (чтобы не было 2 попыток за одно сворачивание)
+*/
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
   if (document.hidden) {
-    registerLeave("hidden");
+    if (!isHiddenCycle) {
+      isHiddenCycle = true;
+      registerLeave("hidden");
+    }
   } else {
-    showWarning("⚠️ Возврат в тест зафиксирован",
-      `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
+    if (isHiddenCycle) {
+      showWarning("⚠️ Возврат в тест зафиксирован", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
+      isHiddenCycle = false;
+    }
   }
 });
 
 window.addEventListener("blur", () => {
   if (!testStarted || finished) return;
+  // ✅ если уже hidden — не считаем blur вторым уходом
+  if (document.hidden || isHiddenCycle) return;
   registerLeave("blur");
 });
 
 window.addEventListener("focus", () => {
   if (!testStarted || finished) return;
-  showWarning("⚠️ Возврат в тест зафиксирован",
-    `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
+  // просто уведомление при возвращении фокуса
+  showWarning("ℹ️ Проверка фокуса", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`, 1400);
 });
 
 $("startBtn").addEventListener("click", startTest);
 $("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
 $("closeBtn").addEventListener("click", () => tg?.close?.());
 
-sid = getSidFromUrl();
+// init
+(async () => {
+  await ensureSid();
+})();
