@@ -11,7 +11,7 @@ let blurCount = 0;
 let hiddenCount = 0;
 let leaveCount = 0;
 
-let isHiddenCycle = false; // один цикл "ушёл -> вернулся"
+let isHiddenCycle = false;
 let startedAt = 0;
 
 let timeLeft = TEST_DURATION_SEC;
@@ -20,38 +20,7 @@ let timerId = null;
 let testStarted = false;
 let finished = false;
 
-const questions = [
-  { id: "q1", type: "single", text: "ИСМП — это…", options: [
-    { id: "a", text: "инфекции, связанные с оказанием медицинской помощи", correct: true },
-    { id: "b", text: "инфекции, передающиеся половым путём", correct: false },
-    { id: "c", text: "инфекции пищевого происхождения", correct: false },
-    { id: "d", text: "внутрибольничные аллергии", correct: false }
-  ]},
-  { id: "q2", type: "single", text: "Главная цель профилактики ИСМП — это…", options: [
-    { id: "a", text: "снижение риска инфицирования пациентов и персонала", correct: true },
-    { id: "b", text: "увеличение количества процедур", correct: false },
-    { id: "c", text: "ускорение выписки пациентов", correct: false },
-    { id: "d", text: "уменьшение затрат на питание", correct: false }
-  ]},
-  { id: "q3", type: "single", text: "Наиболее эффективная мера профилактики ИСМП — это…", options: [
-    { id: "a", text: "ношение перчаток всегда и везде", correct: false },
-    { id: "b", text: "гигиена рук по показаниям", correct: true },
-    { id: "c", text: "проветривание палат каждые 2 часа", correct: false },
-    { id: "d", text: "приём витаминов персоналом", correct: false }
-  ]},
-  { id: "q4", type: "single", text: "К контактному пути передачи ИСМП относится…", options: [
-    { id: "a", text: "укус насекомого", correct: false },
-    { id: "b", text: "передача через руки/поверхности/инструменты при нарушении режима", correct: true },
-    { id: "c", text: "только воздушно-капельная передача", correct: false },
-    { id: "d", text: "передача через пищу при любой инфекции", correct: false }
-  ]},
-  { id: "q5", type: "multi", text: "Выберите НЕСКОЛЬКО мер профилактики ИСМП (несколько правильных):", options: [
-    { id: "a", text: "гигиена рук", correct: true },
-    { id: "b", text: "стерилизация/дезинфекция инструментов по режимам", correct: true },
-    { id: "c", text: "использование СИЗ по показаниям", correct: true },
-    { id: "d", text: "отмена уборки для экономии времени", correct: false }
-  ]}
-];
+let questions = []; // ✅ теперь грузим из JSON
 
 function $(id) { return document.getElementById(id); }
 
@@ -88,11 +57,7 @@ function showWarning(title, subtitle = "", ms = 2200) {
   warnTimer = setTimeout(() => (box.style.display = "none"), ms);
 }
 
-/**
- * ✅ Универсальная отправка
- * beacon=true полезен для событий (когда ответ не нужен)
- * beacon=false обязателен для /api/new-session (нужен sid в ответе)
- */
+/** postJSON: beacon можно только когда ответ не нужен */
 function postJSON(url, data, { beacon = true } = {}) {
   const body = JSON.stringify(data ?? {});
   if (beacon && navigator.sendBeacon) {
@@ -113,7 +78,7 @@ async function postEvent(type, payload) {
   return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
 }
 
-/* ✅ sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
+/* sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
 async function ensureSid() {
   const fromUrl = getSidFromUrl();
   if (fromUrl) {
@@ -128,16 +93,42 @@ async function ensureSid() {
     return sid;
   }
 
-  // Важно: beacon=false, иначе sid не получим!
   const resp = await postJSON("/api/new-session", {}, { beacon: false });
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
     sessionStorage.setItem("sid", sid);
-    showWarning("ℹ️ Сеанс создан заново", "Лучше открывать через кнопку в боте");
+    showWarning("ℹ️ Сеанс создан заново", "Лучше открывать тест через кнопку в боте");
     return sid;
   }
 
   return "";
+}
+
+/* ✅ загрузка вопросов из JSON */
+async function loadQuestions() {
+  try {
+    const res = await fetch(`/questions.json?v=30`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const q = Array.isArray(data?.questions) ? data.questions : [];
+    if (!q.length) throw new Error("questions пустой");
+
+    // минимальная валидация структуры
+    for (const item of q) {
+      if (!item?.id || !item?.type || !item?.text || !Array.isArray(item?.options)) {
+        throw new Error("неверный формат questions.json");
+      }
+    }
+
+    questions = q;
+    $("metaPill").textContent = `ИСМП • ${questions.length} вопросов`;
+    return true;
+  } catch (e) {
+    console.error("loadQuestions failed:", e?.message || e);
+    showModal("Ошибка", "Не удалось загрузить вопросы. Проверьте questions.json на сервере.", "Ок");
+    return false;
+  }
 }
 
 function renderQuestions() {
@@ -225,7 +216,7 @@ function stopTimer() {
   timerId = null;
 }
 
-/* ✅ Считаем уход ТОЛЬКО по hidden */
+/* ✅ Считаем уход ТОЛЬКО по hidden (честно) */
 async function registerHiddenLeave() {
   if (!testStarted || finished) return;
 
@@ -239,7 +230,7 @@ async function registerHiddenLeave() {
   }
 }
 
-/* blur не считается как попытка — только лог */
+/* blur только логируем, не считаем попыткой */
 async function logBlurOnly() {
   if (!testStarted || finished) return;
   blurCount += 1;
@@ -249,6 +240,12 @@ async function logBlurOnly() {
 async function startTest() {
   fio = $("fio").value.trim();
   if (!fio) return showModal("Ошибка", "Введите ФИО");
+
+  // гарантируем наличие вопросов
+  if (!questions.length) {
+    const ok = await loadQuestions();
+    if (!ok) return;
+  }
 
   await ensureSid();
   if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
@@ -313,7 +310,7 @@ async function finishTest({ reason = "manual" } = {}) {
   $("closeBtn").style.display = "block";
 }
 
-/* ✅ события */
+/* события */
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
@@ -330,10 +327,8 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// blur не увеличивает попытки
 window.addEventListener("blur", () => {
   if (!testStarted || finished) return;
-  // чтобы не спамить blur, если уже hidden
   if (document.hidden || isHiddenCycle) return;
   logBlurOnly();
 });
@@ -345,4 +340,5 @@ $("closeBtn").addEventListener("click", () => tg?.close?.());
 // init
 (async () => {
   await ensureSid();
+  await loadQuestions(); // заранее подгружаем, чтобы при старте не ждать
 })();

@@ -21,20 +21,8 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
 
-/**
- * sessions: sid -> {
- *   sid, createdAt,
- *   tgUserId, tgChatId,
- *   fio,
- *   blurCount, hiddenCount, leaveCount,
- *   startedAt, finishedAt,
- *   score, total,
- *   events: [{type, payload, ts}]
- * }
- */
 const sessions = new Map();
 
-// --- Telegram helpers ---
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 async function tg(method, payload) {
@@ -76,7 +64,6 @@ function buildStartKeyboard(sid) {
   };
 }
 
-// --- polling ---
 let offset = 0;
 let polling = false;
 
@@ -126,9 +113,7 @@ async function handleUpdate(update) {
       const lines = last.map((s) => {
         const fio = s.fio || "—";
         const score = (s.score != null) ? `${s.score}/${s.total ?? "?"}` : "—";
-        const leaves = Number.isFinite(Number(s.leaveCount))
-          ? Number(s.leaveCount)
-          : ((s.blurCount || 0) + (s.hiddenCount || 0));
+        const leaves = Number.isFinite(Number(s.leaveCount)) ? Number(s.leaveCount) : 0;
         return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${leaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score}`;
       });
 
@@ -198,10 +183,8 @@ async function pollLoop() {
   }
 }
 
-// --- API ---
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ sid fallback если открылось без ?sid=...
 app.post("/api/new-session", (req, res) => {
   const sid = newSid();
   sessions.set(sid, {
@@ -235,7 +218,6 @@ app.post("/api/event", async (req, res) => {
     const p = payload || {};
     s.events.push({ type, payload: p, ts: when });
 
-    // старт
     if (type === "start" && p?.fio) {
       s.fio = String(p.fio).trim().slice(0, 120);
       s.startedAt = Date.now();
@@ -245,18 +227,17 @@ app.post("/api/event", async (req, res) => {
       return res.json({ ok: true });
     }
 
-    // уходы (детали)
     if (type === "blur") s.blurCount = Number(p?.blurCount ?? (s.blurCount + 1));
     if (type === "hidden") s.hiddenCount = Number(p?.hiddenCount ?? (s.hiddenCount + 1));
 
-    // ✅ leaveCount обновляем ТОЛЬКО если пришёл от клиента
-    // иначе НЕ пересчитываем как blur+hidden (чтобы не было "нечестно")
+    // leaveCount обновляем ТОЛЬКО если пришёл от клиента
     if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
       s.leaveCount = Number(p.leaveCount);
     }
 
     sessions.set(sid, s);
 
+    // админу пишем ТОЛЬКО на hidden (честно)
     if (type === "hidden") {
       const fio = s.fio || "ФИО не введено";
       const leaves = Number(s.leaveCount || 0);
@@ -269,7 +250,6 @@ app.post("/api/event", async (req, res) => {
       return res.json({ ok: true, shouldFinish: leaves >= 3 });
     }
 
-    // blur только логируем (без shouldFinish и без спама админу)
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ ok: false, error: "server_error" });

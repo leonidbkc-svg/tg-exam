@@ -14,7 +14,7 @@
       min-height: 100%;
       background-image:
         linear-gradient(rgba(0,0,0,0.18), rgba(0,0,0,0.18)),
-        url("/bg.jpg?v=20");
+        url("/bg.jpg?v=30");
       background-size: cover;
       background-position: center;
       background-repeat: no-repeat;
@@ -138,7 +138,6 @@
       line-height: 1.35;
     }
 
-    /* предупреждение при возврате */
     .warn {
       position: fixed;
       left: 16px;
@@ -164,7 +163,6 @@
       opacity: 0.85;
     }
 
-    /* ✅ модал (вместо alert) */
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -220,7 +218,7 @@
   <div class="card" id="testScreen" style="display:none;">
     <div class="row">
       <div class="pill" id="timerPill">⏱ 05:00</div>
-      <div class="pill">ИСМП • 5 вопросов</div>
+      <div class="pill" id="metaPill">ИСМП • … вопросов</div>
     </div>
 
     <div id="questions"></div>
@@ -231,6 +229,6 @@
     <div class="muted" id="note"></div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=30"></script>
 </body>
 </html>
