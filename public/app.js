@@ -60,7 +60,7 @@ function pickTestQuestions(pool, n) {
   }));
   shuffleInPlace(copy);
   const picked = copy.slice(0, Math.min(n, copy.length));
-  for (const q of picked) shuffleInPlace(q.options); // мешаем ответы
+  for (const q of picked) shuffleInPlace(q.options);
   return picked;
 }
 
@@ -79,16 +79,6 @@ function hideModal() {
   $("modalBackdrop").style.display = "none";
 }
 $("modalBtn").addEventListener("click", hideModal);
-
-/* предупреждение */
-let warnTimer = null;
-function showWarning(title, subtitle = "", ms = 2200) {
-  const box = $("warnBox");
-  box.innerHTML = `${title}${subtitle ? `<small>${subtitle}</small>` : ""}`;
-  box.style.display = "block";
-  if (warnTimer) clearTimeout(warnTimer);
-  warnTimer = setTimeout(() => (box.style.display = "none"), ms);
-}
 
 /* ✅ оверлей “возврат/выход зафиксирован” */
 function showReturnOverlay() {
@@ -140,7 +130,7 @@ async function postEvent(type, payload) {
   return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
 }
 
-/* sid: URL -> sessionStorage -> /api/new-session */
+/* sid */
 async function ensureSid() {
   const fromUrl = getSidFromUrl();
   if (fromUrl) {
@@ -165,7 +155,7 @@ async function ensureSid() {
   return "";
 }
 
-/* ✅ загрузка вопросов из JSON */
+/* ✅ загрузка вопросов */
 async function loadQuestions() {
   try {
     const res = await fetch(`/questions.json?v=31`, { cache: "no-store" });
@@ -276,7 +266,7 @@ function stopTimer() {
   timerId = null;
 }
 
-/* ✅ Считаем уход ТОЛЬКО по hidden */
+/* ✅ уход только hidden */
 async function registerHiddenLeave() {
   if (!testStarted || finished) return;
 
@@ -378,7 +368,7 @@ function runConfetti(ms = 1800) {
   confettiRaf = requestAnimationFrame(tick);
 }
 
-/* ------------------ Навигация экранов ------------------ */
+/* ------------------ Навигация ------------------ */
 
 function showScreen(which) {
   const screens = ["homeScreen", "startScreen", "rulesScreen", "testScreen", "resultScreen"];
@@ -389,15 +379,10 @@ function showScreen(which) {
   }
 }
 
-function goHome() {
-  showScreen("homeScreen");
-}
+function goHome() { showScreen("homeScreen"); }
+function goStudentStart() { showScreen("startScreen"); }
 
-function goStudentStart() {
-  showScreen("startScreen");
-}
-
-/* ------------------ Новый flow: ФИО -> Правила -> Тест ------------------ */
+/* ------------------ Flow ------------------ */
 
 function goRules() {
   fio = $("fio").value.trim();
@@ -501,7 +486,6 @@ async function finishTest({ reason = "manual" } = {}) {
 
   const passNeed = getPassNeed(total);
   let passed = score >= passNeed;
-
   if (reason === "too_many_violations") passed = false;
 
   if (passed && reason === "manual") runConfetti(1800);
@@ -510,50 +494,37 @@ async function finishTest({ reason = "manual" } = {}) {
 
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
 
-  // --- УСПЕХ: только уточка + поздравляем + 7/10 (70%) ---
+  // всегда минимально: заголовок + sub + (уточка если успех) + результат
+  const titleEl = $("resultTitle");
+  const subEl = $("resultSubtitle");
+  const mascot = $("mascotWrap");
+  const scoreEl = $("resultScore");
+
+  scoreEl.textContent = `${score}/${total} (${pct}%)`;
+
   if (passed && reason !== "too_many_violations") {
-    // прячем заголовки сверху (чтобы было как ты хочешь)
-    $("resultTitle").style.display = "none";
-    $("resultSubtitle").style.display = "none";
-
-    // показываем уточку и текст под ней
-    $("mascotWrap").style.display = "block";
-
-    // только сухой результат
-    $("resultPill").textContent = `${score}/${total} (${pct}%)`;
-
-    // никакой инфы
-    $("resultMeta").style.display = "none";
-
-    // пересдача не нужна
+    titleEl.textContent = "✅ Экзамен сдан";
+    subEl.textContent = "Поздравляем! 🎉";
+    mascot.style.display = "block";
     $("retakeBtn").style.display = "none";
-
   } else {
-    // --- НЕУСПЕХ / ВРЕМЯ / НАРУШЕНИЯ: оставляем понятный заголовок + результат ---
-    $("resultTitle").style.display = "block";
-    $("resultSubtitle").style.display = "block";
-
-    $("mascotWrap").style.display = "none";
-
+    // не сдал: тоже красиво и коротко
     if (reason === "too_many_violations") {
-      $("resultTitle").textContent = "🚨 Экзамен завершён автоматически";
-      $("resultSubtitle").textContent = "Причина: превышено количество уходов из теста.";
+      titleEl.textContent = "🚨 Экзамен завершён автоматически";
+      subEl.textContent = "Выходы из теста зафиксированы.";
     } else if (reason === "time_up") {
-      $("resultTitle").textContent = "❌ Экзамен не сдан";
-      $("resultSubtitle").textContent = "Время истекло. Ответы зафиксированы.";
+      titleEl.textContent = "❌ Экзамен не сдан";
+      subEl.textContent = "Время истекло.";
     } else {
-      $("resultTitle").textContent = "❌ Экзамен не сдан";
-      $("resultSubtitle").textContent = "Результат ниже порога.";
+      titleEl.textContent = "❌ Экзамен не сдан";
+      subEl.textContent = "Попробуйте ещё раз. 💪";
     }
 
-    $("resultPill").textContent = `${score}/${total} (${pct}%)`;
-
-    // “лишнюю инфу” убираем
-    $("resultMeta").style.display = "none";
+    mascot.style.display = "none";
 
     // кнопка пересдачи — только если НЕ сдал и НЕ нарушения
     const retakeBtn = $("retakeBtn");
-    if (!passed && reason !== "too_many_violations") {
+    if (reason !== "too_many_violations") {
       retakeBtn.style.display = "block";
       retakeBtn.disabled = false;
       retakeBtn.textContent = "📩 Запросить пересдачу";
@@ -565,7 +536,7 @@ async function finishTest({ reason = "manual" } = {}) {
   lastResult = { sid, fio, score, total, reason, passed, pct };
 }
 
-/* события анти-чита */
+/* анти-чит */
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
