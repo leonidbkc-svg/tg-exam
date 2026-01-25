@@ -39,6 +39,10 @@ function getSidFromUrl() {
   return (sp.get("sid") || "").trim();
 }
 
+function getInitDataSafe() {
+  return window.Telegram?.WebApp?.initData || "";
+}
+
 function formatTime(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
@@ -80,7 +84,7 @@ function hideModal() {
 }
 $("modalBtn").addEventListener("click", hideModal);
 
-/* предупреждение (оставили на всякий, но “возврат” теперь через оверлей) */
+/* предупреждение (оставили на всякий) */
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
@@ -90,7 +94,7 @@ function showWarning(title, subtitle = "", ms = 2200) {
   warnTimer = setTimeout(() => (box.style.display = "none"), ms);
 }
 
-/* ✅ оверлей “возврат/выход зафиксирован” */
+/* ✅ оверлей “выход зафиксирован” */
 function showReturnOverlay() {
   const backdrop = $("returnBackdrop");
   const title = $("returnTitle");
@@ -138,10 +142,11 @@ function postJSON(url, data, { beacon = true } = {}) {
 
 async function postEvent(type, payload) {
   if (!sid) return { ok: false };
-  return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
+  const initData = getInitDataSafe();
+  return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now(), initData }, { beacon: true });
 }
 
-/* sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
+/* ✅ sid: ТОЛЬКО URL -> sessionStorage. Без /api/new-session. */
 async function ensureSid() {
   const fromUrl = getSidFromUrl();
   if (fromUrl) {
@@ -156,14 +161,7 @@ async function ensureSid() {
     return sid;
   }
 
-  const resp = await postJSON("/api/new-session", {}, { beacon: false });
-  if (resp?.ok && resp.sid) {
-    sid = String(resp.sid);
-    sessionStorage.setItem("sid", sid);
-    // ✅ убрали всплывающее уведомление при создании нового сеанса
-    return sid;
-  }
-
+  // ❌ больше НЕ создаём сессию из Mini App
   return "";
 }
 
@@ -422,7 +420,9 @@ async function beginTest() {
   }
 
   await ensureSid();
-  if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
+  if (!sid) {
+    return showModal("Ошибка", "Сеанс не найден. Откройте тест через кнопку в Telegram-боте.", "Ок");
+  }
 
   questions = pickTestQuestions(allQuestions, QUESTIONS_PER_TEST);
   sessionStorage.setItem("activeQuestions", JSON.stringify(questions));
@@ -471,16 +471,17 @@ async function requestRetake() {
     fio,
     score: lastResult.score,
     total: lastResult.total,
-    reason: lastResult.reason
+    reason: lastResult.reason,
+    initData: getInitDataSafe()
   }, { beacon: false });
 
   if (resp?.ok) {
     btn.textContent = "✅ Запрос отправлен";
-    showModal("Запрос отправлен", "Экзаменатор получит запрос на пересдачу. Если пересдача будет одобрена — вам придёт новая кнопка в чате.", "Ок");
+    showModal("Запрос отправлен", "Экзаменатор получил запрос. Если пересдача будет одобрена — вам придёт новая кнопка в чате.", "Ок");
   } else {
     btn.disabled = false;
     btn.textContent = "📩 Запросить пересдачу";
-    showModal("Ошибка", "Не удалось отправить запрос на пересдачу. Попробуйте ещё раз.", "Ок");
+    showModal("Ошибка", "Не удалось отправить запрос. Попробуйте ещё раз.", "Ок");
   }
 }
 
@@ -500,7 +501,8 @@ async function finishTest({ reason = "manual" } = {}) {
   await postJSON("/api/submit", {
     sid, fio, score, total, reason,
     blurCount, hiddenCount, leaveCount,
-    spentSec
+    spentSec,
+    initData: getInitDataSafe()
   }, { beacon: false });
 
   const passNeed = getPassNeed(total);
@@ -553,6 +555,12 @@ async function finishTest({ reason = "manual" } = {}) {
   }
 
   lastResult = { sid, fio, score, total, reason, passed, pct };
+
+  // ✅ чтобы студент не мог “просто закрыть/открыть и начать снова”
+  // очищаем локальный sid и набор вопросов
+  sessionStorage.removeItem("activeQuestions");
+  sessionStorage.removeItem("sid");
+  sid = "";
 }
 
 /* события анти-чита */
@@ -567,8 +575,7 @@ document.addEventListener("visibilitychange", () => {
   } else {
     if (isHiddenCycle) {
       isHiddenCycle = false;
-      // ✅ вместо жёлтой плашки — оверлей на ~5 сек
-      showReturnOverlay();
+      showReturnOverlay(); // ✅ оверлей на 5 сек
     }
   }
 });

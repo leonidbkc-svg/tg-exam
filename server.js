@@ -18,7 +18,6 @@ const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 6 * 60 * 60 * 1000); // 6 часов
 const CLEANUP_EVERY_MS = 10 * 60 * 1000; // 10 минут
 
-// логика пересдачи/порог
 const PASS_RATE = 0.70;
 
 if (!BOT_TOKEN || !ADMIN_TG_ID || !APP_URL) {
@@ -40,6 +39,9 @@ const sessions = new Map();
 
 // attempt counters per tgUserId
 const attemptsByUser = new Map();
+
+// ✅ запоминаем последний chatId по userId (чтобы можно было прислать кнопку пересдачи)
+const lastChatIdByUserId = new Map(); // userId -> chatId
 
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
@@ -211,6 +213,7 @@ function getSessionOrFallbackCreate(sid) {
   const existing = sessions.get(sid);
   if (existing) return { session: existing, created: false };
 
+  // старое поведение — создавать на лету если STRICT_SID=0
   if (!STRICT_SID) {
     const s = {
       sid,
@@ -221,7 +224,10 @@ function getSessionOrFallbackCreate(sid) {
       leaveCount: 0,
       events: [],
       attemptNo: 1,
-      retakeStatus: null
+      retakeStatus: null,
+      boundUserId: null,
+      tgUserId: null,
+      tgChatId: null
     };
     sessions.set(sid, s);
     return { session: s, created: true };
@@ -241,6 +247,27 @@ function calcPassed(score, total) {
   return Number(score || 0) >= need;
 }
 
+function tryBindFromInitData(s, initData) {
+  if (!initData) return;
+
+  const vr = verifyTelegramInitData(initData);
+  if (!vr.ok) return;
+
+  const uid = vr.user?.id;
+  if (uid == null) return;
+
+  s.boundUserId = String(uid);
+
+  // если сессия не знает чат — подтянем по последнему известному
+  if (!s.tgChatId) {
+    const chatId = lastChatIdByUserId.get(String(uid));
+    if (chatId) {
+      s.tgChatId = chatId;
+      s.tgUserId = uid;
+    }
+  }
+}
+
 // ---------------- Bot polling ----------------
 
 let offset = 0;
@@ -252,6 +279,9 @@ async function handleUpdate(update) {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     const text = (msg.text || "").trim();
+
+    // ✅ запоминаем chatId по userId
+    if (userId && chatId) lastChatIdByUserId.set(String(userId), chatId);
 
     if (text === "/start") {
       const sid = newSid();
@@ -323,6 +353,9 @@ async function handleUpdate(update) {
     const userId = cq.from?.id;
     const data = cq.data || "";
     if (!chatId) return;
+
+    // ✅ запоминаем chatId по userId
+    if (userId && chatId) lastChatIdByUserId.set(String(userId), chatId);
 
     try { await tg("answerCallbackQuery", { callback_query_id: cq.id }); } catch {}
 
@@ -443,10 +476,20 @@ async function handleUpdate(update) {
           return;
         }
 
+        // ✅ если нет tgChatId, но есть boundUserId — попробуем восстановить чат
+        if (!s.tgChatId && s.boundUserId) {
+          const chat = lastChatIdByUserId.get(String(s.boundUserId));
+          if (chat) {
+            s.tgChatId = chat;
+            s.tgUserId = Number(s.boundUserId);
+            sessions.set(oldSid, s);
+          }
+        }
+
         if (!s.tgChatId || !s.tgUserId) {
           s.retakeStatus = "approved_nochat";
           sessions.set(oldSid, s);
-          await edit("⚠️ Пересдача одобрена, но у сессии нет tgChatId/tgUserId — не могу отправить студенту кнопку.", buildBackToMenuKeyboard());
+          await edit("⚠️ Пересдача одобрена, но не удалось определить чат студента (нет tgChatId/tgUserId).", buildBackToMenuKeyboard());
           return;
         }
 
@@ -576,6 +619,9 @@ app.get("/health", (req, res) => res.json({
   requireTgAuth: REQUIRE_TG_AUTH
 }));
 
+/**
+ * 🔙 старое: создание сессии без бота (оставили, но фронт больше НЕ использует)
+ */
 app.post("/api/new-session", (req, res) => {
   const sid = newSid();
   sessions.set(sid, {
@@ -587,7 +633,10 @@ app.post("/api/new-session", (req, res) => {
     leaveCount: 0,
     events: [],
     attemptNo: 1,
-    retakeStatus: null
+    retakeStatus: null,
+    boundUserId: null,
+    tgUserId: null,
+    tgChatId: null
   });
   return res.json({ ok: true, sid });
 });
@@ -600,24 +649,16 @@ app.post("/api/event", async (req, res) => {
     const { session: s } = getSessionOrFallbackCreate(sid);
     if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
 
-    // Telegram auth binding for bot-created sessions
-    if (s.tgUserId) {
-      if (initData) {
-        const vr = verifyTelegramInitData(initData);
-        if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-        } else {
-          const uid = vr.user?.id;
-          if (uid != null) {
-            s.boundUserId = String(uid);
-            if (String(uid) !== String(s.tgUserId)) {
-              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
-              await sendAdmin(`⚠️ Возможная подмена пользователя\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}\ntype=${type}`);
-            }
-          }
-        }
-      } else if (REQUIRE_TG_AUTH) {
-        return res.status(401).json({ ok: false, error: "initData_required" });
+    // ✅ если initData пришёл — попытаемся привязать user.id и восстановить чат
+    tryBindFromInitData(s, initData);
+
+    // Telegram auth requirement for bot-created sessions
+    if (s.tgUserId && REQUIRE_TG_AUTH) {
+      const vr = verifyTelegramInitData(initData);
+      if (!vr.ok) return res.status(401).json({ ok: false, error: "initData_required_or_bad" });
+      const uid = vr.user?.id;
+      if (uid != null && String(uid) !== String(s.tgUserId)) {
+        return res.status(403).json({ ok: false, error: "user_mismatch" });
       }
     }
 
@@ -692,24 +733,16 @@ app.post("/api/submit", async (req, res) => {
 
     if (isFinished(s)) return res.json({ ok: true, alreadyFinished: true });
 
-    // Telegram auth binding for bot-created sessions
-    if (s.tgUserId) {
-      if (initData) {
-        const vr = verifyTelegramInitData(initData);
-        if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-        } else {
-          const uid = vr.user?.id;
-          if (uid != null) {
-            s.boundUserId = String(uid);
-            if (String(uid) !== String(s.tgUserId)) {
-              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
-              await sendAdmin(`⚠️ Возможная подмена пользователя (submit)\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}`);
-            }
-          }
-        }
-      } else if (REQUIRE_TG_AUTH) {
-        return res.status(401).json({ ok: false, error: "initData_required" });
+    // ✅ initData → bind user
+    tryBindFromInitData(s, initData);
+
+    // Telegram auth requirement for bot-created sessions
+    if (s.tgUserId && REQUIRE_TG_AUTH) {
+      const vr = verifyTelegramInitData(initData);
+      if (!vr.ok) return res.status(401).json({ ok: false, error: "initData_required_or_bad" });
+      const uid = vr.user?.id;
+      if (uid != null && String(uid) !== String(s.tgUserId)) {
+        return res.status(403).json({ ok: false, error: "user_mismatch" });
       }
     }
 
@@ -721,6 +754,7 @@ app.post("/api/submit", async (req, res) => {
     s.score = Number(score ?? 0);
     s.total = Number(total ?? 0);
     s.finishedAt = Date.now();
+    s.reason = reason || "manual";
     sessions.set(sid, s);
 
     const fioText = s.fio || "ФИО не введено";
@@ -732,7 +766,7 @@ app.post("/api/submit", async (req, res) => {
       too_many_violations: "авто-завершение (3-й уход)"
     };
 
-    const passed = (reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
+    const passed = (s.reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
     const passText = passed ? "✅ СДАН" : "❌ НЕ СДАН";
 
     await sendAdmin(
@@ -740,7 +774,7 @@ app.post("/api/submit", async (req, res) => {
       `ФИО: ${fioText}\n` +
       `Попытка: ${s.attemptNo || "—"}\n` +
       `Результат: ${s.score}/${s.total}\n` +
-      `Причина: ${reasonMap[reason] || (reason || "manual")}\n` +
+      `Причина: ${reasonMap[s.reason] || s.reason}\n` +
       `Уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
       (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
       `sid: ${sid}\n` +
@@ -759,21 +793,22 @@ app.post("/api/submit", async (req, res) => {
  */
 app.post("/api/retake-request", async (req, res) => {
   try {
-    const { sid, fio, score, total, reason } = req.body || {};
+    const { sid, fio, score, total, reason, initData } = req.body || {};
     if (!sid) return res.status(400).json({ ok: false, error: "bad_request" });
 
     const s = sessions.get(sid);
     if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
 
-    // пересдача только если тест завершён
+    // ✅ bind user/chat from initData (чтобы потом можно было отправить кнопку)
+    tryBindFromInitData(s, initData);
+    sessions.set(sid, s);
+
     if (!s.finishedAt) return res.status(400).json({ ok: false, error: "not_finished" });
 
-    // если нарушения — не даём пересдачу через кнопку (чтобы античит имел смысл)
     if (String(reason || s.reason || "") === "too_many_violations") {
       return res.status(403).json({ ok: false, error: "violations_no_retake" });
     }
 
-    // если сдал — тоже не надо
     const passed = calcPassed(score ?? s.score, total ?? s.total);
     if (passed) return res.status(400).json({ ok: false, error: "already_passed" });
 
@@ -793,8 +828,8 @@ app.post("/api/retake-request", async (req, res) => {
       `Попытка: ${s.attemptNo || "—"}\n` +
       `Результат: ${scr}\n` +
       `sid: ${sid}\n` +
-      (s.tgUserId ? `tgUserId: ${s.tgUserId}\n` : "") +
-      (s.tgChatId ? `tgChatId: ${s.tgChatId}\n` : ""),
+      (s.boundUserId ? `user.id: ${s.boundUserId}\n` : "") +
+      (s.tgChatId ? `tgChatId: ${s.tgChatId}\n` : "tgChatId: —\n"),
       buildRetakeDecisionKeyboard(sid)
     );
 
