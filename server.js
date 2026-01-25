@@ -13,27 +13,16 @@ const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 /**
- * ✅ ФЛАГИ "НЕ ЛОМАТЬ СТАРОЕ"
- * - Если STRICT_SID=false → поведение как раньше: /api/event может создать сессию сам.
- * - Если STRICT_SID=true  → /api/event и /api/submit требуют существующий sid (экзаменационный режим).
- *
- * Рекомендую включить, но вы просили "старое не удалять" — поэтому это переключаемо.
+ * НЕ ЛОМАЕМ СТАРОЕ: флаги режимов
+ * STRICT_SID=1         -> /api/event и /api/submit не создают сессию сами
+ * REQUIRE_TG_AUTH=1    -> требует валидный Telegram initData для bot-сессий
  */
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
-
-/**
- * ✅ Валидация Telegram initData
- * - Если REQUIRE_TG_AUTH=false → всё работает как раньше, initData просто логируется.
- * - Если REQUIRE_TG_AUTH=true  → /api/event и /api/submit требуют валидный initData для "telegram-сессий".
- */
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 
-/**
- * TTL для очистки сессий из памяти (чтобы Map не рос бесконечно)
- */
+/** очистка sessions из памяти */
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 6 * 60 * 60 * 1000); // 6 часов
 const CLEANUP_EVERY_MS = 10 * 60 * 1000; // 10 минут
-
 
 if (!BOT_TOKEN || !ADMIN_TG_ID || !APP_URL) {
   console.error("❌ Не заданы BOT_TOKEN / ADMIN_TG_ID / APP_URL");
@@ -50,13 +39,13 @@ app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] })
 /**
  * sessions: Map<sid, session>
  * session:
- *  - sid
- *  - createdAt
+ *  - sid, createdAt
  *  - tgUserId / tgChatId (если создано ботом)
+ *  - boundUserId (из initData после проверки)
  *  - fio
  *  - blurCount / hiddenCount / leaveCount
  *  - startedAt / finishedAt
- *  - boundUserId (если подтвержден initData)
+ *  - score / total
  *  - events[]
  */
 const sessions = new Map();
@@ -102,16 +91,66 @@ function buildStartKeyboard(sid) {
   };
 }
 
-/**
- * ✅ Telegram initData verification (HMAC)
- * Док-логика:
- *  - parse querystring initData
- *  - extract "hash"
- *  - build data_check_string = sorted key=value excluding hash, joined with \n
- *  - secret_key = sha256(bot_token)
- *  - hmac = HMAC-SHA256(secret_key, data_check_string)
- *  - compare hex to hash
- */
+// ---------------- Admin helpers (ТОЛЬКО ДЛЯ ВАС) ----------------
+
+function isAdmin(userId) {
+  return String(userId) === String(ADMIN_TG_ID);
+}
+
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  return d.toISOString().replace("T", " ").slice(0, 19);
+}
+
+function sessionSummaryLine(s) {
+  const fio = s.fio || "—";
+  const score = (s.score != null && s.total != null) ? `${s.score}/${s.total}` : "—";
+  const leaves = Number.isFinite(Number(s.leaveCount)) ? Number(s.leaveCount) : 0;
+  const status = s.finishedAt ? "✅" : "🕓";
+  const sidShort = (s.sid || "").slice(0, 6);
+  return `${status} ${fio} | ${score} | уходов=${leaves} | sid=${sidShort}… | end=${fmtTime(s.finishedAt)}`;
+}
+
+function getSessionsSorted() {
+  return Array.from(sessions.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+function buildAdminMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📊 Сводка", callback_data: "ADM_SUMMARY" }],
+      [{ text: "🧾 Последние 10 (удаление)", callback_data: "ADM_LAST_10" }]
+    ]
+  };
+}
+
+function buildBackToMenuKeyboard() {
+  return { inline_keyboard: [[{ text: "⬅️ Назад в меню", callback_data: "ADM_MENU" }]] };
+}
+
+function buildLast10WithDeleteKeyboard(list) {
+  const rows = list.map(s => {
+    const sidShort = (s.sid || "").slice(0, 6);
+    const fio = (s.fio || "—").slice(0, 18);
+    return [{ text: `🗑 ${fio} (${sidShort}…)`, callback_data: `ADM_DEL:${s.sid}` }];
+  });
+
+  rows.push([{ text: "⬅️ Назад в меню", callback_data: "ADM_MENU" }]);
+  return { inline_keyboard: rows };
+}
+
+function buildConfirmDeleteKeyboard(sid) {
+  return {
+    inline_keyboard: [
+      [{ text: "⚠️ Да, удалить", callback_data: `ADM_DEL_DO:${sid}` }],
+      [{ text: "Отмена", callback_data: "ADM_LAST_10" }]
+    ]
+  };
+}
+
+// ---------------- Telegram initData verification (HMAC) ----------------
+
 function verifyTelegramInitData(initData, { maxAgeSec = 24 * 60 * 60 } = {}) {
   try {
     if (!initData || typeof initData !== "string") return { ok: false, error: "no_initData" };
@@ -120,7 +159,6 @@ function verifyTelegramInitData(initData, { maxAgeSec = 24 * 60 * 60 } = {}) {
     const hash = params.get("hash");
     if (!hash) return { ok: false, error: "no_hash" };
 
-    // collect key=value excluding hash
     const pairs = [];
     for (const [key, val] of params.entries()) {
       if (key === "hash") continue;
@@ -135,14 +173,12 @@ function verifyTelegramInitData(initData, { maxAgeSec = 24 * 60 * 60 } = {}) {
 
     if (hmac !== hash) return { ok: false, error: "bad_hash" };
 
-    // auth_date freshness (optional)
     const authDate = Number(params.get("auth_date") || 0);
     if (authDate > 0) {
       const ageSec = Math.floor(Date.now() / 1000) - authDate;
       if (ageSec > maxAgeSec) return { ok: false, error: "auth_date_expired" };
     }
 
-    // user parsing
     const userRaw = params.get("user");
     let user = null;
     if (userRaw) {
@@ -150,17 +186,16 @@ function verifyTelegramInitData(initData, { maxAgeSec = 24 * 60 * 60 } = {}) {
     }
 
     return { ok: true, user, authDate };
-  } catch (e) {
+  } catch {
     return { ok: false, error: "verify_exception" };
   }
 }
 
 function getSessionOrFallbackCreate(sid) {
-  // ✅ Новый экзаменационный режим: если STRICT_SID=1 → требуем существующий sid
   const existing = sessions.get(sid);
   if (existing) return { session: existing, created: false };
 
-  // 🔙 СТАРОЕ ПОВЕДЕНИЕ (НЕ УДАЛЯЮ): авто-создание сессии
+  // 🔙 старое поведение (если STRICT_SID=0): создавать сессию “на лету”
   if (!STRICT_SID) {
     const s = {
       sid,
@@ -182,6 +217,8 @@ function isFinished(s) {
   return Boolean(s?.finishedAt);
 }
 
+// ---------------- Bot polling ----------------
+
 let offset = 0;
 let polling = false;
 
@@ -199,7 +236,7 @@ async function handleUpdate(update) {
         createdAt: Date.now(),
         tgUserId: userId,
         tgChatId: chatId,
-        boundUserId: null, // ✅ сюда "прибьём" user.id из initData
+        boundUserId: null,
         fio: null,
         blurCount: 0,
         hiddenCount: 0,
@@ -224,26 +261,29 @@ async function handleUpdate(update) {
     }
 
     if (text === "/admin") {
-      if (String(userId) !== String(ADMIN_TG_ID)) {
+      if (!isAdmin(userId)) {
         await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
         return;
       }
 
-      const last = Array.from(sessions.values())
-        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-        .slice(0, 10);
-
-      const lines = last.map((s) => {
-        const fio = s.fio || "—";
-        const score = (s.score != null) ? `${s.score}/${s.total ?? "?"}` : "—";
-        const leaves = Number.isFinite(Number(s.leaveCount)) ? Number(s.leaveCount) : 0;
-        const bound = s.boundUserId ? `bound=${s.boundUserId}` : "bound=—";
-        return `• ${fio} | sid=${s.sid.slice(0, 6)}… | уходов=${leaves} (blur=${s.blurCount} hidden=${s.hiddenCount}) | score=${score} | ${bound}`;
-      });
-
       await tg("sendMessage", {
         chat_id: chatId,
-        text: "Последние 10 сессий:\n" + (lines.length ? lines.join("\n") : "Пока пусто.")
+        text: "🔐 Админ-меню",
+        reply_markup: buildAdminMenuKeyboard()
+      });
+      return;
+    }
+
+    // 🔙 оставим быстрый текстовый список как раньше (если надо)
+    if (text === "/last10") {
+      if (!isAdmin(userId)) {
+        await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
+        return;
+      }
+      const last = getSessionsSorted().slice(0, 10);
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "Последние 10:\n" + (last.length ? last.map(sessionSummaryLine).join("\n") : "Пока пусто.")
       });
       return;
     }
@@ -253,9 +293,13 @@ async function handleUpdate(update) {
     const cq = update.callback_query;
     const chatId = cq.message?.chat?.id;
     const userId = cq.from?.id;
-    const data = cq.data;
+    const data = cq.data || "";
     if (!chatId) return;
 
+    // всегда отвечаем callback’у, чтобы кнопки не “висели”
+    try { await tg("answerCallbackQuery", { callback_query_id: cq.id }); } catch {}
+
+    // ---- обычные кнопки для всех ----
     if (data === "NEW_SESSION") {
       const sid = newSid();
       sessions.set(sid, {
@@ -275,12 +319,94 @@ async function handleUpdate(update) {
         events: []
       });
 
-      await tg("answerCallbackQuery", { callback_query_id: cq.id });
       await tg("sendMessage", {
         chat_id: chatId,
         text: "Ок, создал новый сеанс. Жми кнопку:",
         reply_markup: buildStartKeyboard(sid)
       });
+      return;
+    }
+
+    // ---- admin кнопки (ТОЛЬКО ВЫ) ----
+    if (data.startsWith("ADM_")) {
+      if (!isAdmin(userId)) {
+        // даже если кто-то увидит кнопку — доступа нет
+        try {
+          await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
+        } catch {}
+        return;
+      }
+
+      const messageId = cq.message?.message_id;
+
+      const edit = async (text, reply_markup) => {
+        try {
+          await tg("editMessageText", {
+            chat_id: chatId,
+            message_id: messageId,
+            text,
+            reply_markup
+          });
+        } catch {
+          // если редактирование невозможно — просто отправим новое сообщение
+          await tg("sendMessage", { chat_id: chatId, text, reply_markup });
+        }
+      };
+
+      if (data === "ADM_MENU") {
+        await edit("🔐 Админ-меню", buildAdminMenuKeyboard());
+        return;
+      }
+
+      if (data === "ADM_SUMMARY") {
+        const list = getSessionsSorted();
+        const total = list.length;
+        const finished = list.filter(s => s.finishedAt).length;
+
+        const top = list
+          .filter(s => Number.isFinite(Number(s.score)) && Number.isFinite(Number(s.total)) && Number(s.total) > 0)
+          .sort((a, b) => (Number(b.score) / Number(b.total)) - (Number(a.score) / Number(a.total)))
+          .slice(0, 7)
+          .map((s, i) => `${i + 1}) ${(s.fio || "—")} — ${s.score}/${s.total} (уходов=${s.leaveCount || 0})`)
+          .join("\n") || "—";
+
+        await edit(
+          `📊 Сводка\n` +
+          `Всего сессий: ${total}\n` +
+          `Завершено: ${finished}\n\n` +
+          `🏆 Топ:\n${top}`,
+          buildBackToMenuKeyboard()
+        );
+        return;
+      }
+
+      if (data === "ADM_LAST_10") {
+        const last = getSessionsSorted().slice(0, 10);
+        const text = "🧾 Последние 10:\n" + (last.length ? last.map(sessionSummaryLine).join("\n") : "Пока пусто.");
+        await edit(text, buildLast10WithDeleteKeyboard(last));
+        return;
+      }
+
+      // ADM_DEL:<sid>
+      if (data.startsWith("ADM_DEL:")) {
+        const sid = data.split(":")[1] || "";
+        const s = sessions.get(sid);
+        const fio = s?.fio || "—";
+        const sidShort = sid.slice(0, 10);
+        await edit(
+          `⚠️ Удалить попытку?\nФИО: ${fio}\nsid: ${sidShort}…`,
+          buildConfirmDeleteKeyboard(sid)
+        );
+        return;
+      }
+
+      // ADM_DEL_DO:<sid>
+      if (data.startsWith("ADM_DEL_DO:")) {
+        const sid = data.split(":")[1] || "";
+        const existed = sessions.delete(sid);
+        await edit(existed ? "🗑 Удалено." : "ℹ️ Уже удалено.", buildBackToMenuKeyboard());
+        return;
+      }
     }
   }
 }
@@ -312,9 +438,7 @@ async function pollLoop() {
   }
 }
 
-/**
- * ✅ cleanup old sessions (не влияет на рабочее поведение)
- */
+// cleanup
 setInterval(() => {
   const now = Date.now();
   for (const [sid, s] of sessions.entries()) {
@@ -323,6 +447,7 @@ setInterval(() => {
   }
 }, CLEANUP_EVERY_MS);
 
+// ---------------- HTTP API ----------------
 
 app.get("/health", (req, res) => res.json({
   ok: true,
@@ -331,8 +456,7 @@ app.get("/health", (req, res) => res.json({
 }));
 
 /**
- * 🔙 СТАРОЕ (НЕ УДАЛЯЮ): создание сессии без бота
- * Для экзамена лучше не использовать, но оставляем как было.
+ * 🔙 старое: создание сессии без бота
  */
 app.post("/api/new-session", (req, res) => {
   const sid = newSid();
@@ -353,37 +477,22 @@ app.post("/api/event", async (req, res) => {
     const { sid, type, payload, ts, initData } = req.body || {};
     if (!sid || !type) return res.status(400).json({ ok: false, error: "bad_request" });
 
-    const { session: s, created } = getSessionOrFallbackCreate(sid);
-    if (!s) {
-      // ✅ экзаменационный режим: sid обязателен
-      return res.status(404).json({ ok: false, error: "unknown_sid" });
-    }
+    const { session: s } = getSessionOrFallbackCreate(sid);
+    if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
 
-    // ✅ Если сессия ботом создана (есть tgUserId) — привязываем к initData user.id
-    // 🔙 Если initData нет — не ломаем старое, но можем потребовать если REQUIRE_TG_AUTH=1
+    // Telegram auth binding for bot-created sessions
     if (s.tgUserId) {
       if (initData) {
         const vr = verifyTelegramInitData(initData);
         if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) {
-            return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-          }
+          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
         } else {
           const uid = vr.user?.id;
           if (uid != null) {
             s.boundUserId = String(uid);
             if (String(uid) !== String(s.tgUserId)) {
-              // чужой аккаунт открыл ссылку
-              if (REQUIRE_TG_AUTH) {
-                return res.status(403).json({ ok: false, error: "user_mismatch" });
-              } else {
-                // мягкий режим: просто уведомим админа
-                await sendAdmin(
-                  `⚠️ Возможная подмена пользователя\nsid: ${sid}\n` +
-                  `ожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}\n` +
-                  `type=${type}`
-                );
-              }
+              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
+              await sendAdmin(`⚠️ Возможная подмена пользователя\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}\ntype=${type}`);
             }
           }
         }
@@ -402,15 +511,10 @@ app.post("/api/event", async (req, res) => {
       s.startedAt = Date.now();
       sessions.set(sid, s);
 
-      await sendAdmin(
-        `✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n` +
-        (created ? "⚠️ sid был создан через fallback (не из бота)\n" : "") +
-        (s.boundUserId ? `user.id: ${s.boundUserId}\n` : "")
-      );
+      await sendAdmin(`✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n${s.boundUserId ? `user.id: ${s.boundUserId}` : ""}`);
       return res.json({ ok: true });
     }
 
-    // счетчики
     if (type === "blur") {
       const next = Number.isFinite(Number(p?.blurCount)) ? Number(p.blurCount) : (Number(s.blurCount || 0) + 1);
       s.blurCount = next;
@@ -421,14 +525,13 @@ app.post("/api/event", async (req, res) => {
       s.hiddenCount = next;
     }
 
-    // leaveCount только от клиента
     if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
       s.leaveCount = Number(p.leaveCount);
     }
 
     sessions.set(sid, s);
 
-    // админу пишем ТОЛЬКО на hidden (как у вас)
+    // админу пишем только hidden
     if (type === "hidden") {
       const fio = s.fio || "ФИО не введено";
       const leaves = Number(s.leaveCount || 0);
@@ -455,35 +558,25 @@ app.post("/api/submit", async (req, res) => {
     const { sid, fio, score, total, reason, blurCount, hiddenCount, leaveCount, spentSec, initData } = req.body || {};
     if (!sid) return res.status(400).json({ ok: false, error: "bad_request" });
 
-    const { session: s, created } = getSessionOrFallbackCreate(sid);
+    const { session: s } = getSessionOrFallbackCreate(sid);
     if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
 
-    // ✅ ИДЕМПОТЕНТНОСТЬ: если уже завершено — не шлём админу повторно
-    if (isFinished(s)) {
-      return res.json({ ok: true, alreadyFinished: true });
-    }
+    // идемпотентно: не спамим админа повторным submit
+    if (isFinished(s)) return res.json({ ok: true, alreadyFinished: true });
 
-    // ✅ Привязка к Telegram user через initData (аналогично /api/event)
+    // Telegram auth binding for bot-created sessions
     if (s.tgUserId) {
       if (initData) {
         const vr = verifyTelegramInitData(initData);
         if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) {
-            return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-          }
+          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
         } else {
           const uid = vr.user?.id;
           if (uid != null) {
             s.boundUserId = String(uid);
             if (String(uid) !== String(s.tgUserId)) {
-              if (REQUIRE_TG_AUTH) {
-                return res.status(403).json({ ok: false, error: "user_mismatch" });
-              } else {
-                await sendAdmin(
-                  `⚠️ Возможная подмена пользователя (submit)\n` +
-                  `sid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}`
-                );
-              }
+              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
+              await sendAdmin(`⚠️ Возможная подмена пользователя (submit)\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}`);
             }
           }
         }
@@ -519,7 +612,6 @@ app.post("/api/submit", async (req, res) => {
       `Уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
       (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
       `sid: ${sid}\n` +
-      (created ? "⚠️ sid был создан через fallback (не из бота)\n" : "") +
       (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
     );
 
