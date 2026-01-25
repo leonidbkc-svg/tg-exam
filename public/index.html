@@ -278,24 +278,16 @@
     <div class="overlay-card">
       <div class="spooky-duck">
         <svg viewBox="0 0 240 160" width="240" height="160" aria-hidden="true">
-          <!-- тень -->
           <ellipse cx="120" cy="138" rx="78" ry="12" fill="rgba(0,0,0,0.12)"/>
-          <!-- тело -->
           <ellipse cx="132" cy="92" rx="68" ry="42" fill="#FFD34D"/>
-          <!-- голова -->
           <circle cx="80" cy="78" r="30" fill="#FFD34D"/>
-          <!-- щёчки -->
           <circle cx="64" cy="90" r="7" fill="#FFB3C1" opacity="0.75"/>
           <circle cx="95" cy="90" r="7" fill="#FFB3C1" opacity="0.75"/>
-          <!-- клюв -->
           <path d="M52 78 C38 78, 38 102, 56 100 C68 98, 68 82, 52 78 Z" fill="#FF9F0A"/>
-          <!-- глазки “страшно-милые” -->
           <circle cx="84" cy="74" r="6.5" fill="#111"/>
           <circle cx="82" cy="72" r="2.1" fill="#fff"/>
           <path d="M104 68 C118 64, 130 66, 136 78" fill="none" stroke="#111" stroke-width="6" stroke-linecap="round" opacity="0.75"/>
-          <!-- крыло -->
           <path d="M150 98 C170 86, 194 90, 198 110 C182 118, 164 118, 150 98 Z" fill="#FFC933"/>
-          <!-- маленькая “молния” -->
           <path d="M176 42 L160 70 L178 70 L162 98" fill="none" stroke="#FF2D55" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
         </svg>
       </div>
@@ -393,11 +385,15 @@
           <circle class="spark s4" cx="34" cy="102" r="4" fill="#34C759"/>
         </svg>
       </div>
-      <div class="muted" style="margin-top:6px;">Ура! Экзамен сдан 🎉</div>
+      <div class="muted" style="margin-top:6px; font-size:14px; color:#333;">
+        Поздравляем! Экзамен сдан.
+      </div>
     </div>
 
     <div class="pill" id="resultPill" style="display:inline-flex; margin-bottom:10px;"></div>
-    <div class="muted" id="resultMeta"></div>
+
+    <!-- ✅ скрыто навсегда (по твоей просьбе) -->
+    <div class="muted" id="resultMeta" style="display:none;"></div>
 
     <button class="secondary" id="retakeBtn" style="display:none;">📩 Запросить пересдачу</button>
     <button id="resultCloseBtn">Закрыть</button>

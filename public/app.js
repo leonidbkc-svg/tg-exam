@@ -80,7 +80,7 @@ function hideModal() {
 }
 $("modalBtn").addEventListener("click", hideModal);
 
-/* предупреждение (оставили на всякий, но “возврат” теперь через оверлей) */
+/* предупреждение */
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
@@ -109,7 +109,6 @@ function showReturnOverlay() {
   if (returnOverlayTimer) clearTimeout(returnOverlayTimer);
   if (returnOverlayHideTimer) clearTimeout(returnOverlayHideTimer);
 
-  // показываем ~5 секунд, затем плавно исчезаем
   returnOverlayTimer = setTimeout(() => {
     backdrop.classList.add("fadeout");
   }, 4200);
@@ -120,7 +119,7 @@ function showReturnOverlay() {
   }, 5000);
 }
 
-/** postJSON: beacon можно только когда ответ не нужен */
+/** postJSON */
 function postJSON(url, data, { beacon = true } = {}) {
   const body = JSON.stringify(data ?? {});
   if (beacon && navigator.sendBeacon) {
@@ -141,7 +140,7 @@ async function postEvent(type, payload) {
   return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
 }
 
-/* sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
+/* sid: URL -> sessionStorage -> /api/new-session */
 async function ensureSid() {
   const fromUrl = getSidFromUrl();
   if (fromUrl) {
@@ -160,14 +159,13 @@ async function ensureSid() {
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
     sessionStorage.setItem("sid", sid);
-    // ✅ убрали всплывающее уведомление при создании нового сеанса
     return sid;
   }
 
   return "";
 }
 
-/* ✅ загрузка вопросов из JSON (в allQuestions) */
+/* ✅ загрузка вопросов из JSON */
 async function loadQuestions() {
   try {
     const res = await fetch(`/questions.json?v=31`, { cache: "no-store" });
@@ -278,7 +276,7 @@ function stopTimer() {
   timerId = null;
 }
 
-/* ✅ Считаем уход ТОЛЬКО по hidden (честно) */
+/* ✅ Считаем уход ТОЛЬКО по hidden */
 async function registerHiddenLeave() {
   if (!testStarted || finished) return;
 
@@ -292,14 +290,13 @@ async function registerHiddenLeave() {
   }
 }
 
-/* blur только логируем, не считаем попыткой */
 async function logBlurOnly() {
   if (!testStarted || finished) return;
   blurCount += 1;
   await postEvent("blur", { fio, blurCount, hiddenCount, leaveCount });
 }
 
-/* ------------------ 🎉 Confetti (хлопушка) ------------------ */
+/* ------------------ 🎉 Confetti ------------------ */
 
 let confettiRaf = null;
 
@@ -449,7 +446,6 @@ async function beginTest() {
   $("note").textContent = "";
 }
 
-/* ✅ отключаем только элементы теста, не ломая экран результата */
 function disableTestInputsOnly() {
   const test = $("testScreen");
   if (!test) return;
@@ -514,42 +510,56 @@ async function finishTest({ reason = "manual" } = {}) {
 
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
 
-  if (reason === "too_many_violations") {
-    $("resultTitle").textContent = "🚨 Экзамен завершён автоматически";
-    $("resultSubtitle").textContent = "Причина: превышено количество уходов из теста.";
-  } else if (reason === "time_up") {
-    $("resultTitle").textContent = passed ? "✅ Экзамен сдан" : "❌ Экзамен не сдан";
-    $("resultSubtitle").textContent = "Время истекло. Ответы зафиксированы.";
+  // --- УСПЕХ: только уточка + поздравляем + 7/10 (70%) ---
+  if (passed && reason !== "too_many_violations") {
+    // прячем заголовки сверху (чтобы было как ты хочешь)
+    $("resultTitle").style.display = "none";
+    $("resultSubtitle").style.display = "none";
+
+    // показываем уточку и текст под ней
+    $("mascotWrap").style.display = "block";
+
+    // только сухой результат
+    $("resultPill").textContent = `${score}/${total} (${pct}%)`;
+
+    // никакой инфы
+    $("resultMeta").style.display = "none";
+
+    // пересдача не нужна
+    $("retakeBtn").style.display = "none";
+
   } else {
-    $("resultTitle").textContent = passed ? "✅ Экзамен сдан" : "❌ Экзамен не сдан";
-    $("resultSubtitle").textContent = passed
-      ? "Поздравляем! Результат выше порога."
-      : "Результат ниже порога.";
-  }
+    // --- НЕУСПЕХ / ВРЕМЯ / НАРУШЕНИЯ: оставляем понятный заголовок + результат ---
+    $("resultTitle").style.display = "block";
+    $("resultSubtitle").style.display = "block";
 
-  $("resultPill").textContent = `Результат: ${score}/${total} (${pct}%) • Порог: ${passNeed}/${total}`;
+    $("mascotWrap").style.display = "none";
 
-  const reasonMap = {
-    manual: "завершено вручную",
-    time_up: "время вышло",
-    too_many_violations: "3-й уход"
-  };
+    if (reason === "too_many_violations") {
+      $("resultTitle").textContent = "🚨 Экзамен завершён автоматически";
+      $("resultSubtitle").textContent = "Причина: превышено количество уходов из теста.";
+    } else if (reason === "time_up") {
+      $("resultTitle").textContent = "❌ Экзамен не сдан";
+      $("resultSubtitle").textContent = "Время истекло. Ответы зафиксированы.";
+    } else {
+      $("resultTitle").textContent = "❌ Экзамен не сдан";
+      $("resultSubtitle").textContent = "Результат ниже порога.";
+    }
 
-  $("resultMeta").textContent =
-    `ФИО: ${fio}\n` +
-    `Уходов: ${leaveCount} (blur=${blurCount}, hidden=${hiddenCount})\n` +
-    `Причина: ${reasonMap[reason] || reason}`;
+    $("resultPill").textContent = `${score}/${total} (${pct}%)`;
 
-  $("mascotWrap").style.display = (passed && reason !== "too_many_violations") ? "block" : "none";
+    // “лишнюю инфу” убираем
+    $("resultMeta").style.display = "none";
 
-  // кнопка пересдачи — только если НЕ сдал и НЕ нарушения
-  const retakeBtn = $("retakeBtn");
-  if (!passed && reason !== "too_many_violations") {
-    retakeBtn.style.display = "block";
-    retakeBtn.disabled = false;
-    retakeBtn.textContent = "📩 Запросить пересдачу";
-  } else {
-    retakeBtn.style.display = "none";
+    // кнопка пересдачи — только если НЕ сдал и НЕ нарушения
+    const retakeBtn = $("retakeBtn");
+    if (!passed && reason !== "too_many_violations") {
+      retakeBtn.style.display = "block";
+      retakeBtn.disabled = false;
+      retakeBtn.textContent = "📩 Запросить пересдачу";
+    } else {
+      retakeBtn.style.display = "none";
+    }
   }
 
   lastResult = { sid, fio, score, total, reason, passed, pct };
@@ -567,7 +577,6 @@ document.addEventListener("visibilitychange", () => {
   } else {
     if (isHiddenCycle) {
       isHiddenCycle = false;
-      // ✅ вместо жёлтой плашки — оверлей на ~5 сек
       showReturnOverlay();
     }
   }
