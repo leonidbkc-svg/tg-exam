@@ -12,17 +12,14 @@ const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // строкой
 const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
-/**
- * НЕ ЛОМАЕМ СТАРОЕ: флаги режимов
- * STRICT_SID=1         -> /api/event и /api/submit не создают сессию сами
- * REQUIRE_TG_AUTH=1    -> требует валидный Telegram initData для bot-сессий
- */
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 
-/** очистка sessions из памяти */
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 6 * 60 * 60 * 1000); // 6 часов
 const CLEANUP_EVERY_MS = 10 * 60 * 1000; // 10 минут
+
+// логика пересдачи/порог
+const PASS_RATE = 0.70;
 
 if (!BOT_TOKEN || !ADMIN_TG_ID || !APP_URL) {
   console.error("❌ Не заданы BOT_TOKEN / ADMIN_TG_ID / APP_URL");
@@ -38,17 +35,11 @@ app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] })
 
 /**
  * sessions: Map<sid, session>
- * session:
- *  - sid, createdAt
- *  - tgUserId / tgChatId (если создано ботом)
- *  - boundUserId (из initData после проверки)
- *  - fio
- *  - blurCount / hiddenCount / leaveCount
- *  - startedAt / finishedAt
- *  - score / total
- *  - events[]
  */
 const sessions = new Map();
+
+// attempt counters per tgUserId
+const attemptsByUser = new Map();
 
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
@@ -66,9 +57,9 @@ async function tg(method, payload) {
   return data.result;
 }
 
-async function sendAdmin(text) {
+async function sendAdmin(text, reply_markup = undefined) {
   try {
-    await tg("sendMessage", { chat_id: ADMIN_TG_ID, text });
+    await tg("sendMessage", { chat_id: ADMIN_TG_ID, text, reply_markup });
   } catch (e) {
     console.error("sendAdmin failed:", e.message);
   }
@@ -91,6 +82,21 @@ function buildStartKeyboard(sid) {
   };
 }
 
+function buildRetakeDecisionKeyboard(sid) {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Разрешить пересдачу", callback_data: `RET_OK:${sid}` }],
+      [{ text: "❌ Отказать", callback_data: `RET_NO:${sid}` }]
+    ]
+  };
+}
+
+function buildRetakeStartKeyboard(sid) {
+  return {
+    inline_keyboard: [[{ text: "✅ Начать пересдачу", web_app: { url: makeWebAppUrl(sid) } }]]
+  };
+}
+
 // ---------------- Admin helpers (ТОЛЬКО ДЛЯ ВАС) ----------------
 
 function isAdmin(userId) {
@@ -103,13 +109,23 @@ function fmtTime(ts) {
   return d.toISOString().replace("T", " ").slice(0, 19);
 }
 
+function getNextAttemptNo(tgUserId) {
+  if (!tgUserId) return 1;
+  const k = String(tgUserId);
+  const prev = Number(attemptsByUser.get(k) || 0);
+  const next = prev + 1;
+  attemptsByUser.set(k, next);
+  return next;
+}
+
 function sessionSummaryLine(s) {
   const fio = s.fio || "—";
   const score = (s.score != null && s.total != null) ? `${s.score}/${s.total}` : "—";
   const leaves = Number.isFinite(Number(s.leaveCount)) ? Number(s.leaveCount) : 0;
   const status = s.finishedAt ? "✅" : "🕓";
   const sidShort = (s.sid || "").slice(0, 6);
-  return `${status} ${fio} | ${score} | уходов=${leaves} | sid=${sidShort}… | end=${fmtTime(s.finishedAt)}`;
+  const attempt = s.attemptNo ? `попытка#${s.attemptNo}` : "попытка#—";
+  return `${status} ${fio} | ${score} | уходов=${leaves} | ${attempt} | sid=${sidShort}… | end=${fmtTime(s.finishedAt)}`;
 }
 
 function getSessionsSorted() {
@@ -195,7 +211,6 @@ function getSessionOrFallbackCreate(sid) {
   const existing = sessions.get(sid);
   if (existing) return { session: existing, created: false };
 
-  // 🔙 старое поведение (если STRICT_SID=0): создавать сессию “на лету”
   if (!STRICT_SID) {
     const s = {
       sid,
@@ -204,7 +219,9 @@ function getSessionOrFallbackCreate(sid) {
       blurCount: 0,
       hiddenCount: 0,
       leaveCount: 0,
-      events: []
+      events: [],
+      attemptNo: 1,
+      retakeStatus: null
     };
     sessions.set(sid, s);
     return { session: s, created: true };
@@ -215,6 +232,13 @@ function getSessionOrFallbackCreate(sid) {
 
 function isFinished(s) {
   return Boolean(s?.finishedAt);
+}
+
+function calcPassed(score, total) {
+  const t = Number(total || 0);
+  if (!t) return false;
+  const need = Math.ceil(t * PASS_RATE);
+  return Number(score || 0) >= need;
 }
 
 // ---------------- Bot polling ----------------
@@ -231,6 +255,8 @@ async function handleUpdate(update) {
 
     if (text === "/start") {
       const sid = newSid();
+      const attemptNo = getNextAttemptNo(userId);
+
       sessions.set(sid, {
         sid,
         createdAt: Date.now(),
@@ -245,7 +271,9 @@ async function handleUpdate(update) {
         finishedAt: null,
         score: null,
         total: null,
-        events: []
+        events: [],
+        attemptNo,
+        retakeStatus: null
       });
 
       await tg("sendMessage", {
@@ -254,7 +282,8 @@ async function handleUpdate(update) {
           "Привет! Это тест по ИСМП.\n\n" +
           "Нажми кнопку ниже, введи ФИО и проходи тест.\n" +
           "⚠️ Сворачивания/переключения фиксируются.\n" +
-          "🚫 На 3-м уходе тест завершится автоматически.",
+          "🚫 На 3-м уходе тест завершится автоматически.\n" +
+          `🧾 Попытка: ${attemptNo}`,
         reply_markup: buildStartKeyboard(sid)
       });
       return;
@@ -274,7 +303,6 @@ async function handleUpdate(update) {
       return;
     }
 
-    // 🔙 оставим быстрый текстовый список как раньше (если надо)
     if (text === "/last10") {
       if (!isAdmin(userId)) {
         await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
@@ -296,12 +324,13 @@ async function handleUpdate(update) {
     const data = cq.data || "";
     if (!chatId) return;
 
-    // всегда отвечаем callback’у, чтобы кнопки не “висели”
     try { await tg("answerCallbackQuery", { callback_query_id: cq.id }); } catch {}
 
     // ---- обычные кнопки для всех ----
     if (data === "NEW_SESSION") {
       const sid = newSid();
+      const attemptNo = getNextAttemptNo(userId);
+
       sessions.set(sid, {
         sid,
         createdAt: Date.now(),
@@ -316,24 +345,23 @@ async function handleUpdate(update) {
         finishedAt: null,
         score: null,
         total: null,
-        events: []
+        events: [],
+        attemptNo,
+        retakeStatus: null
       });
 
       await tg("sendMessage", {
         chat_id: chatId,
-        text: "Ок, создал новый сеанс. Жми кнопку:",
+        text: `Ок, создал новый сеанс. Попытка: ${attemptNo}. Жми кнопку:`,
         reply_markup: buildStartKeyboard(sid)
       });
       return;
     }
 
     // ---- admin кнопки (ТОЛЬКО ВЫ) ----
-    if (data.startsWith("ADM_")) {
+    if (data.startsWith("ADM_") || data.startsWith("RET_")) {
       if (!isAdmin(userId)) {
-        // даже если кто-то увидит кнопку — доступа нет
-        try {
-          await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
-        } catch {}
+        try { await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." }); } catch {}
         return;
       }
 
@@ -348,7 +376,6 @@ async function handleUpdate(update) {
             reply_markup
           });
         } catch {
-          // если редактирование невозможно — просто отправим новое сообщение
           await tg("sendMessage", { chat_id: chatId, text, reply_markup });
         }
       };
@@ -367,7 +394,7 @@ async function handleUpdate(update) {
           .filter(s => Number.isFinite(Number(s.score)) && Number.isFinite(Number(s.total)) && Number(s.total) > 0)
           .sort((a, b) => (Number(b.score) / Number(b.total)) - (Number(a.score) / Number(a.total)))
           .slice(0, 7)
-          .map((s, i) => `${i + 1}) ${(s.fio || "—")} — ${s.score}/${s.total} (уходов=${s.leaveCount || 0})`)
+          .map((s, i) => `${i + 1}) ${(s.fio || "—")} — ${s.score}/${s.total} (уходов=${s.leaveCount || 0}) (попытка#${s.attemptNo || "—"})`)
           .join("\n") || "—";
 
         await edit(
@@ -387,7 +414,6 @@ async function handleUpdate(update) {
         return;
       }
 
-      // ADM_DEL:<sid>
       if (data.startsWith("ADM_DEL:")) {
         const sid = data.split(":")[1] || "";
         const s = sessions.get(sid);
@@ -400,11 +426,106 @@ async function handleUpdate(update) {
         return;
       }
 
-      // ADM_DEL_DO:<sid>
       if (data.startsWith("ADM_DEL_DO:")) {
         const sid = data.split(":")[1] || "";
         const existed = sessions.delete(sid);
         await edit(existed ? "🗑 Удалено." : "ℹ️ Уже удалено.", buildBackToMenuKeyboard());
+        return;
+      }
+
+      // ✅ решение по пересдаче
+      if (data.startsWith("RET_OK:")) {
+        const oldSid = data.split(":")[1] || "";
+        const s = sessions.get(oldSid);
+
+        if (!s) {
+          await edit("ℹ️ Сессия не найдена (возможно, истекла по TTL).", buildBackToMenuKeyboard());
+          return;
+        }
+
+        if (!s.tgChatId || !s.tgUserId) {
+          s.retakeStatus = "approved_nochat";
+          sessions.set(oldSid, s);
+          await edit("⚠️ Пересдача одобрена, но у сессии нет tgChatId/tgUserId — не могу отправить студенту кнопку.", buildBackToMenuKeyboard());
+          return;
+        }
+
+        const newSessionSid = newSid();
+        const attemptNo = getNextAttemptNo(s.tgUserId);
+
+        sessions.set(newSessionSid, {
+          sid: newSessionSid,
+          createdAt: Date.now(),
+          tgUserId: s.tgUserId,
+          tgChatId: s.tgChatId,
+          boundUserId: null,
+          fio: null,
+          blurCount: 0,
+          hiddenCount: 0,
+          leaveCount: 0,
+          startedAt: null,
+          finishedAt: null,
+          score: null,
+          total: null,
+          events: [],
+          attemptNo,
+          retakeStatus: null
+        });
+
+        s.retakeStatus = "approved";
+        s.retakeApprovedAt = Date.now();
+        s.retakeNewSid = newSessionSid;
+        sessions.set(oldSid, s);
+
+        try {
+          await tg("sendMessage", {
+            chat_id: s.tgChatId,
+            text: `✅ Пересдача одобрена.\nПопытка: ${attemptNo}\nНажмите кнопку ниже, чтобы начать.`,
+            reply_markup: buildRetakeStartKeyboard(newSessionSid)
+          });
+        } catch (e) {
+          console.error("send retake start to student failed:", e.message);
+        }
+
+        await edit(
+          `✅ Пересдача одобрена.\n` +
+          `ФИО: ${s.fio || "—"}\n` +
+          `Старая сессия: ${oldSid}\n` +
+          `Новая сессия: ${newSessionSid}\n` +
+          `Новая попытка: ${attemptNo}`,
+          buildBackToMenuKeyboard()
+        );
+        return;
+      }
+
+      if (data.startsWith("RET_NO:")) {
+        const oldSid = data.split(":")[1] || "";
+        const s = sessions.get(oldSid);
+
+        if (!s) {
+          await edit("ℹ️ Сессия не найдена (возможно, истекла по TTL).", buildBackToMenuKeyboard());
+          return;
+        }
+
+        s.retakeStatus = "denied";
+        s.retakeDeniedAt = Date.now();
+        sessions.set(oldSid, s);
+
+        if (s.tgChatId) {
+          try {
+            await tg("sendMessage", {
+              chat_id: s.tgChatId,
+              text: "❌ Пересдача не одобрена экзаменатором."
+            });
+          } catch (e) {
+            console.error("send retake denied to student failed:", e.message);
+          }
+        }
+
+        await edit(
+          `❌ Пересдача отклонена.\nФИО: ${s.fio || "—"}\nСессия: ${oldSid}`,
+          buildBackToMenuKeyboard()
+        );
         return;
       }
     }
@@ -455,9 +576,6 @@ app.get("/health", (req, res) => res.json({
   requireTgAuth: REQUIRE_TG_AUTH
 }));
 
-/**
- * 🔙 старое: создание сессии без бота
- */
 app.post("/api/new-session", (req, res) => {
   const sid = newSid();
   sessions.set(sid, {
@@ -467,7 +585,9 @@ app.post("/api/new-session", (req, res) => {
     blurCount: 0,
     hiddenCount: 0,
     leaveCount: 0,
-    events: []
+    events: [],
+    attemptNo: 1,
+    retakeStatus: null
   });
   return res.json({ ok: true, sid });
 });
@@ -511,7 +631,13 @@ app.post("/api/event", async (req, res) => {
       s.startedAt = Date.now();
       sessions.set(sid, s);
 
-      await sendAdmin(`✅ Регистрация/старт\nФИО: ${s.fio}\nsid: ${sid}\n${s.boundUserId ? `user.id: ${s.boundUserId}` : ""}`);
+      await sendAdmin(
+        `✅ Регистрация/старт\n` +
+        `ФИО: ${s.fio}\n` +
+        `Попытка: ${s.attemptNo || "—"}\n` +
+        `sid: ${sid}\n` +
+        (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
+      );
       return res.json({ ok: true });
     }
 
@@ -531,14 +657,17 @@ app.post("/api/event", async (req, res) => {
 
     sessions.set(sid, s);
 
-    // админу пишем только hidden
     if (type === "hidden") {
       const fio = s.fio || "ФИО не введено";
       const leaves = Number(s.leaveCount || 0);
       const status = leaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
 
       await sendAdmin(
-        `${status}\nФИО: ${fio}\nsid: ${sid}\nсобытие: hidden\n` +
+        `${status}\n` +
+        `ФИО: ${fio}\n` +
+        `Попытка: ${s.attemptNo || "—"}\n` +
+        `sid: ${sid}\n` +
+        `событие: hidden\n` +
         `уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
         (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
       );
@@ -561,7 +690,6 @@ app.post("/api/submit", async (req, res) => {
     const { session: s } = getSessionOrFallbackCreate(sid);
     if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
 
-    // идемпотентно: не спамим админа повторным submit
     if (isFinished(s)) return res.json({ ok: true, alreadyFinished: true });
 
     // Telegram auth binding for bot-created sessions
@@ -604,9 +732,13 @@ app.post("/api/submit", async (req, res) => {
       too_many_violations: "авто-завершение (3-й уход)"
     };
 
+    const passed = (reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
+    const passText = passed ? "✅ СДАН" : "❌ НЕ СДАН";
+
     await sendAdmin(
-      `🏁 Тест завершён\n` +
+      `🏁 Тест завершён (${passText})\n` +
       `ФИО: ${fioText}\n` +
+      `Попытка: ${s.attemptNo || "—"}\n` +
       `Результат: ${s.score}/${s.total}\n` +
       `Причина: ${reasonMap[reason] || (reason || "manual")}\n` +
       `Уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
@@ -615,9 +747,60 @@ app.post("/api/submit", async (req, res) => {
       (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
     );
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, passed });
   } catch (e) {
     console.error("api/submit error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+/**
+ * ✅ Запрос на пересдачу от студента
+ */
+app.post("/api/retake-request", async (req, res) => {
+  try {
+    const { sid, fio, score, total, reason } = req.body || {};
+    if (!sid) return res.status(400).json({ ok: false, error: "bad_request" });
+
+    const s = sessions.get(sid);
+    if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
+
+    // пересдача только если тест завершён
+    if (!s.finishedAt) return res.status(400).json({ ok: false, error: "not_finished" });
+
+    // если нарушения — не даём пересдачу через кнопку (чтобы античит имел смысл)
+    if (String(reason || s.reason || "") === "too_many_violations") {
+      return res.status(403).json({ ok: false, error: "violations_no_retake" });
+    }
+
+    // если сдал — тоже не надо
+    const passed = calcPassed(score ?? s.score, total ?? s.total);
+    if (passed) return res.status(400).json({ ok: false, error: "already_passed" });
+
+    if (s.retakeStatus === "pending") return res.json({ ok: true, status: "pending_already" });
+    if (s.retakeStatus === "approved") return res.json({ ok: true, status: "approved_already" });
+
+    s.retakeStatus = "pending";
+    s.retakeRequestedAt = Date.now();
+    sessions.set(sid, s);
+
+    const fioText = (fio || s.fio || "ФИО не введено");
+    const scr = (score != null && total != null) ? `${score}/${total}` : `${s.score ?? "—"}/${s.total ?? "—"}`;
+
+    await sendAdmin(
+      `📩 Запрос на пересдачу\n` +
+      `ФИО: ${fioText}\n` +
+      `Попытка: ${s.attemptNo || "—"}\n` +
+      `Результат: ${scr}\n` +
+      `sid: ${sid}\n` +
+      (s.tgUserId ? `tgUserId: ${s.tgUserId}\n` : "") +
+      (s.tgChatId ? `tgChatId: ${s.tgChatId}\n` : ""),
+      buildRetakeDecisionKeyboard(sid)
+    );
+
+    return res.json({ ok: true, status: "pending" });
+  } catch (e) {
+    console.error("api/retake-request error:", e?.message || e);
     return res.status(500).json({ ok: false, error: "server_error" });
   }
 });

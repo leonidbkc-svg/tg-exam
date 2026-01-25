@@ -26,6 +26,12 @@ let finished = false;
 let allQuestions = [];   // полный пул из JSON (30)
 let questions = [];      // активные вопросы текущего теста (10)
 
+let lastResult = null;
+
+// оверлей “возврат в тест”
+let returnOverlayTimer = null;
+let returnOverlayHideTimer = null;
+
 function $(id) { return document.getElementById(id); }
 
 function getSidFromUrl() {
@@ -74,7 +80,7 @@ function hideModal() {
 }
 $("modalBtn").addEventListener("click", hideModal);
 
-/* предупреждение */
+/* предупреждение (оставили на всякий, но “возврат” теперь через оверлей) */
 let warnTimer = null;
 function showWarning(title, subtitle = "", ms = 2200) {
   const box = $("warnBox");
@@ -82,6 +88,36 @@ function showWarning(title, subtitle = "", ms = 2200) {
   box.style.display = "block";
   if (warnTimer) clearTimeout(warnTimer);
   warnTimer = setTimeout(() => (box.style.display = "none"), ms);
+}
+
+/* ✅ оверлей “возврат/выход зафиксирован” */
+function showReturnOverlay() {
+  const backdrop = $("returnBackdrop");
+  const title = $("returnTitle");
+  const text = $("returnText");
+
+  const left = Math.max(0, AUTO_FINISH_AT - leaveCount);
+
+  title.textContent = "Выход из теста зафиксирован";
+  text.textContent =
+    `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}\n` +
+    (left > 0 ? `Осталось попыток: ${left}` : `Дальше — автозавершение`);
+
+  backdrop.classList.remove("fadeout");
+  backdrop.style.display = "flex";
+
+  if (returnOverlayTimer) clearTimeout(returnOverlayTimer);
+  if (returnOverlayHideTimer) clearTimeout(returnOverlayHideTimer);
+
+  // показываем ~5 секунд, затем плавно исчезаем
+  returnOverlayTimer = setTimeout(() => {
+    backdrop.classList.add("fadeout");
+  }, 4200);
+
+  returnOverlayHideTimer = setTimeout(() => {
+    backdrop.style.display = "none";
+    backdrop.classList.remove("fadeout");
+  }, 5000);
 }
 
 /** postJSON: beacon можно только когда ответ не нужен */
@@ -124,7 +160,7 @@ async function ensureSid() {
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
     sessionStorage.setItem("sid", sid);
-    // ✅ убрали всплывающее/предупреждение при создании нового сеанса
+    // ✅ убрали всплывающее уведомление при создании нового сеанса
     return sid;
   }
 
@@ -148,8 +184,6 @@ async function loadQuestions() {
     }
 
     allQuestions = q;
-
-    // metaPill актуален для теста (10 вопросов)
     $("metaPill").textContent = `ИСМП • ${QUESTIONS_PER_TEST} вопросов`;
     return true;
   } catch (e) {
@@ -390,7 +424,6 @@ async function beginTest() {
   await ensureSid();
   if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
 
-  // выбираем 10 случайных вопросов + мешаем варианты
   questions = pickTestQuestions(allQuestions, QUESTIONS_PER_TEST);
   sessionStorage.setItem("activeQuestions", JSON.stringify(questions));
 
@@ -413,16 +446,42 @@ async function beginTest() {
 
   await postEvent("start", { fio });
 
-  // убрали нижнюю “инфу” под кнопками в тесте
   $("note").textContent = "";
 }
 
-function disableAllInputs() {
-  document.querySelectorAll("input, button").forEach(el => {
-    // оставим возможность закрывать модал, если он вдруг открыт
+/* ✅ отключаем только элементы теста, не ломая экран результата */
+function disableTestInputsOnly() {
+  const test = $("testScreen");
+  if (!test) return;
+  test.querySelectorAll("input, button").forEach(el => {
     if (el.id === "modalBtn") return;
     el.disabled = true;
   });
+}
+
+async function requestRetake() {
+  const btn = $("retakeBtn");
+  if (!lastResult?.sid || !sid) return;
+
+  btn.disabled = true;
+  btn.textContent = "⏳ Отправляем запрос…";
+
+  const resp = await postJSON("/api/retake-request", {
+    sid,
+    fio,
+    score: lastResult.score,
+    total: lastResult.total,
+    reason: lastResult.reason
+  }, { beacon: false });
+
+  if (resp?.ok) {
+    btn.textContent = "✅ Запрос отправлен";
+    showModal("Запрос отправлен", "Экзаменатор получит запрос на пересдачу. Если пересдача будет одобрена — вам придёт новая кнопка в чате.", "Ок");
+  } else {
+    btn.disabled = false;
+    btn.textContent = "📩 Запросить пересдачу";
+    showModal("Ошибка", "Не удалось отправить запрос на пересдачу. Попробуйте ещё раз.", "Ок");
+  }
 }
 
 async function finishTest({ reason = "manual" } = {}) {
@@ -436,7 +495,7 @@ async function finishTest({ reason = "manual" } = {}) {
   const total = questions.length;
   const spentSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
 
-  disableAllInputs();
+  disableTestInputsOnly();
 
   await postJSON("/api/submit", {
     sid, fio, score, total, reason,
@@ -447,13 +506,10 @@ async function finishTest({ reason = "manual" } = {}) {
   const passNeed = getPassNeed(total);
   let passed = score >= passNeed;
 
-  // если авто-завершение по нарушениям — считаем “не сдал” всегда
   if (reason === "too_many_violations") passed = false;
 
-  // 🎉 конфетти только если успешно и завершил вручную
   if (passed && reason === "manual") runConfetti(1800);
 
-  // Экран результата вместо модалки
   showScreen("resultScreen");
 
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
@@ -468,7 +524,7 @@ async function finishTest({ reason = "manual" } = {}) {
     $("resultTitle").textContent = passed ? "✅ Экзамен сдан" : "❌ Экзамен не сдан";
     $("resultSubtitle").textContent = passed
       ? "Поздравляем! Результат выше порога."
-      : "Результат ниже порога. Попробуйте ещё раз.";
+      : "Результат ниже порога.";
   }
 
   $("resultPill").textContent = `Результат: ${score}/${total} (${pct}%) • Порог: ${passNeed}/${total}`;
@@ -484,8 +540,19 @@ async function finishTest({ reason = "manual" } = {}) {
     `Уходов: ${leaveCount} (blur=${blurCount}, hidden=${hiddenCount})\n` +
     `Причина: ${reasonMap[reason] || reason}`;
 
-  // милый маскот только если успешно и не нарушения
   $("mascotWrap").style.display = (passed && reason !== "too_many_violations") ? "block" : "none";
+
+  // кнопка пересдачи — только если НЕ сдал и НЕ нарушения
+  const retakeBtn = $("retakeBtn");
+  if (!passed && reason !== "too_many_violations") {
+    retakeBtn.style.display = "block";
+    retakeBtn.disabled = false;
+    retakeBtn.textContent = "📩 Запросить пересдачу";
+  } else {
+    retakeBtn.style.display = "none";
+  }
+
+  lastResult = { sid, fio, score, total, reason, passed, pct };
 }
 
 /* события анти-чита */
@@ -500,7 +567,8 @@ document.addEventListener("visibilitychange", () => {
   } else {
     if (isHiddenCycle) {
       isHiddenCycle = false;
-      showWarning("⚠️ Возврат в тест зафиксирован", `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}`);
+      // ✅ вместо жёлтой плашки — оверлей на ~5 сек
+      showReturnOverlay();
     }
   }
 });
@@ -523,16 +591,16 @@ $("rulesBackBtn").addEventListener("click", () => showScreen("startScreen"));
 
 $("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
 
-// старую кнопку closeBtn оставляем (не ломаем), но она теперь не основная
 $("closeBtn").addEventListener("click", () => tg?.close?.());
 $("resultCloseBtn").addEventListener("click", () => tg?.close?.());
+
+$("retakeBtn").addEventListener("click", requestRetake);
 
 /* init */
 (async () => {
   await ensureSid();
-  await loadQuestions(); // заранее подгружаем, чтобы при старте не ждать
+  await loadQuestions();
 
-  // если страницу перезагрузили во время теста — сохраним набор вопросов (но не продолжаем автоматически)
   const stored = sessionStorage.getItem("activeQuestions");
   if (stored) {
     try { questions = JSON.parse(stored) || []; } catch {}

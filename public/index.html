@@ -97,6 +97,7 @@
       font-weight: 800;
     }
     button:active { opacity: 0.88; }
+    button:disabled { opacity: 0.6; }
 
     .q {
       margin-top: 16px;
@@ -130,7 +131,7 @@
       color: #777;
       margin-top: 10px;
       line-height: 1.35;
-      white-space: pre-line; /* чтобы \n в resultMeta красиво переносились */
+      white-space: pre-line;
     }
 
     .warn {
@@ -192,7 +193,7 @@
       display: none;
     }
 
-    /* 🐥 милый маскот-анимация */
+    /* 🐥 милый маскот-анимация (успех) */
     .mascot {
       display: inline-block;
       transform-origin: 50% 90%;
@@ -213,6 +214,57 @@
       0%, 100% { opacity: 0.25; transform: scale(0.9); }
       50%      { opacity: 1;    transform: scale(1.25); }
     }
+
+    /* 🦆 “страшно-милый” оверлей возврата */
+    .overlay-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 18000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      transition: opacity 0.8s ease;
+      opacity: 1;
+    }
+    .overlay-backdrop.fadeout { opacity: 0; }
+
+    .overlay-card {
+      width: 100%;
+      max-width: 520px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.94);
+      box-shadow: 0 20px 48px rgba(0,0,0,0.35);
+      padding: 18px;
+      text-align: center;
+    }
+    .overlay-title {
+      font-size: 18px;
+      font-weight: 900;
+      margin: 6px 0 6px 0;
+    }
+    .overlay-text {
+      margin: 0;
+      color: #333;
+      line-height: 1.35;
+      white-space: pre-line;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .spooky-duck {
+      display: inline-block;
+      transform-origin: 50% 80%;
+      animation: spooky 0.9s ease-in-out infinite;
+      filter: drop-shadow(0 12px 20px rgba(0,0,0,0.22));
+    }
+    @keyframes spooky {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      35%      { transform: translateY(-5px) rotate(-2deg); }
+      70%      { transform: translateY(0) rotate(2deg); }
+    }
   </style>
 </head>
 
@@ -220,6 +272,38 @@
   <canvas id="confettiCanvas"></canvas>
 
   <div class="warn" id="warnBox"></div>
+
+  <!-- ✅ Оверлей возврата -->
+  <div class="overlay-backdrop" id="returnBackdrop">
+    <div class="overlay-card">
+      <div class="spooky-duck">
+        <svg viewBox="0 0 240 160" width="240" height="160" aria-hidden="true">
+          <!-- тень -->
+          <ellipse cx="120" cy="138" rx="78" ry="12" fill="rgba(0,0,0,0.12)"/>
+          <!-- тело -->
+          <ellipse cx="132" cy="92" rx="68" ry="42" fill="#FFD34D"/>
+          <!-- голова -->
+          <circle cx="80" cy="78" r="30" fill="#FFD34D"/>
+          <!-- щёчки -->
+          <circle cx="64" cy="90" r="7" fill="#FFB3C1" opacity="0.75"/>
+          <circle cx="95" cy="90" r="7" fill="#FFB3C1" opacity="0.75"/>
+          <!-- клюв -->
+          <path d="M52 78 C38 78, 38 102, 56 100 C68 98, 68 82, 52 78 Z" fill="#FF9F0A"/>
+          <!-- глазки “страшно-милые” -->
+          <circle cx="84" cy="74" r="6.5" fill="#111"/>
+          <circle cx="82" cy="72" r="2.1" fill="#fff"/>
+          <path d="M104 68 C118 64, 130 66, 136 78" fill="none" stroke="#111" stroke-width="6" stroke-linecap="round" opacity="0.75"/>
+          <!-- крыло -->
+          <path d="M150 98 C170 86, 194 90, 198 110 C182 118, 164 118, 150 98 Z" fill="#FFC933"/>
+          <!-- маленькая “молния” -->
+          <path d="M176 42 L160 70 L178 70 L162 98" fill="none" stroke="#FF2D55" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+        </svg>
+      </div>
+
+      <div class="overlay-title" id="returnTitle">Выход из теста зафиксирован</div>
+      <p class="overlay-text" id="returnText"></p>
+    </div>
+  </div>
 
   <div class="modal-backdrop" id="modalBackdrop">
     <div class="modal">
@@ -240,8 +324,6 @@
     <button id="btnStudents">👩‍🎓 Тесты для студентов</button>
     <button class="secondary" id="btnResidents">👨‍⚕️ Для ординаторов (скоро)</button>
     <button class="secondary" id="btnStaff">🏥 Для сотрудников центра (скоро)</button>
-
-    <!-- ✅ УБРАЛИ инфо под кнопками по просьбе -->
   </div>
 
   <!-- Экран ввода ФИО -->
@@ -252,23 +334,19 @@
     <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
 
     <button id="startBtn">Продолжить</button>
-
-    <!-- ✅ УБРАЛИ инфо под кнопками по просьбе -->
-
     <button class="secondary" id="backHomeBtn">⬅️ Назад</button>
   </div>
 
   <!-- ✅ Экран правил -->
   <div class="card" id="rulesScreen" style="display:none;">
     <h1>Правила экзамена</h1>
-    <p class="sub">
-      Перед началом ознакомьтесь с правилами:
-    </p>
+    <p class="sub">Перед началом ознакомьтесь с правилами:</p>
 
     <div class="muted" style="font-size:14px;color:#333;line-height:1.45;">
       <div>⏱ Время: <b>5 минут</b></div>
-      <div>🧾 Вопросов: <b>10</b> (случайно из 30)</div>
-      <div>✅ Порог сдачи: <b>70%</b> (нужно ≥ <span id="passNeed">7</span> правильных)</div>
+      <div>🧾 Вопросов: <b>10</b></div>
+      <div>✅ Порог сдачи: <b>70%</b></div>
+      <div>🎯 Минимум: <b><span id="passNeed">7</span></b> правильных</div>
       <div>🚫 <b>3 ухода</b> из приложения → тест завершится автоматически</div>
       <div style="margin-top:10px;">📵 Не сворачивайте Telegram во время теста.</div>
     </div>
@@ -287,11 +365,7 @@
     <div id="questions"></div>
 
     <button id="finishBtn">Завершить тест</button>
-
-    <!-- оставляем как было (не ломаем), но теперь основной выход — на экране результата -->
     <button class="secondary" id="closeBtn" style="display:none;">Закрыть</button>
-
-    <!-- оставили, но будем держать пустым -->
     <div class="muted" id="note"></div>
   </div>
 
@@ -325,6 +399,7 @@
     <div class="pill" id="resultPill" style="display:inline-flex; margin-bottom:10px;"></div>
     <div class="muted" id="resultMeta"></div>
 
+    <button class="secondary" id="retakeBtn" style="display:none;">📩 Запросить пересдачу</button>
     <button id="resultCloseBtn">Закрыть</button>
   </div>
 
