@@ -3,11 +3,15 @@ import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+import dns from "dns";
+
+dns.setDefaultResultOrder("ipv4first");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // строкой
 const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+
 
 if (!BOT_TOKEN || !ADMIN_TG_ID || !APP_URL) {
   console.error("❌ Не заданы BOT_TOKEN / ADMIN_TG_ID / APP_URL");
