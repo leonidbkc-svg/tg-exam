@@ -4,6 +4,9 @@ tg?.expand?.();
 const TEST_DURATION_SEC = 5 * 60;
 const AUTO_FINISH_AT = 3;
 
+const QUESTIONS_PER_TEST = 10;
+const PASS_RATE = 0.70; // 70%
+
 let sid = "";
 let fio = "";
 
@@ -20,7 +23,8 @@ let timerId = null;
 let testStarted = false;
 let finished = false;
 
-let questions = []; // грузим из JSON
+let allQuestions = [];   // полный пул из JSON (30)
+let questions = [];      // активные вопросы текущего теста (10)
 
 function $(id) { return document.getElementById(id); }
 
@@ -33,6 +37,29 @@ function formatTime(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function pickTestQuestions(pool, n) {
+  const copy = pool.map(q => ({
+    ...q,
+    options: q.options.map(o => ({ ...o }))
+  }));
+  shuffleInPlace(copy);
+  const picked = copy.slice(0, Math.min(n, copy.length));
+  for (const q of picked) shuffleInPlace(q.options); // мешаем ответы
+  return picked;
+}
+
+function getPassNeed(total) {
+  return Math.ceil(total * PASS_RATE);
 }
 
 /* модал вместо alert */
@@ -97,14 +124,14 @@ async function ensureSid() {
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
     sessionStorage.setItem("sid", sid);
-    showWarning("ℹ️ Сеанс создан заново", "Лучше открывать тест через кнопку в боте");
+    // ✅ убрали всплывающее/предупреждение при создании нового сеанса
     return sid;
   }
 
   return "";
 }
 
-/* ✅ загрузка вопросов из JSON */
+/* ✅ загрузка вопросов из JSON (в allQuestions) */
 async function loadQuestions() {
   try {
     const res = await fetch(`/questions.json?v=31`, { cache: "no-store" });
@@ -120,8 +147,10 @@ async function loadQuestions() {
       }
     }
 
-    questions = q;
-    $("metaPill").textContent = `ИСМП • ${questions.length} вопросов`;
+    allQuestions = q;
+
+    // metaPill актуален для теста (10 вопросов)
+    $("metaPill").textContent = `ИСМП • ${QUESTIONS_PER_TEST} вопросов`;
     return true;
   } catch (e) {
     console.error("loadQuestions failed:", e?.message || e);
@@ -321,7 +350,7 @@ function runConfetti(ms = 1800) {
 /* ------------------ Навигация экранов ------------------ */
 
 function showScreen(which) {
-  const screens = ["homeScreen", "startScreen", "testScreen"];
+  const screens = ["homeScreen", "startScreen", "rulesScreen", "testScreen", "resultScreen"];
   for (const id of screens) {
     const el = $(id);
     if (!el) continue;
@@ -337,13 +366,23 @@ function goStudentStart() {
   showScreen("startScreen");
 }
 
-/* ------------------ Основная логика теста ------------------ */
+/* ------------------ Новый flow: ФИО -> Правила -> Тест ------------------ */
 
-async function startTest() {
+function goRules() {
   fio = $("fio").value.trim();
   if (!fio) return showModal("Ошибка", "Введите ФИО");
 
-  if (!questions.length) {
+  const passNeed = getPassNeed(QUESTIONS_PER_TEST);
+  $("passNeed").textContent = String(passNeed);
+
+  showScreen("rulesScreen");
+}
+
+async function beginTest() {
+  if (!fio) fio = $("fio").value.trim();
+  if (!fio) return showModal("Ошибка", "Введите ФИО");
+
+  if (!allQuestions.length) {
     const ok = await loadQuestions();
     if (!ok) return;
   }
@@ -351,8 +390,11 @@ async function startTest() {
   await ensureSid();
   if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
 
-  $("startScreen").style.display = "none";
-  $("testScreen").style.display = "block";
+  // выбираем 10 случайных вопросов + мешаем варианты
+  questions = pickTestQuestions(allQuestions, QUESTIONS_PER_TEST);
+  sessionStorage.setItem("activeQuestions", JSON.stringify(questions));
+
+  showScreen("testScreen");
 
   blurCount = 0;
   hiddenCount = 0;
@@ -364,16 +406,21 @@ async function startTest() {
   finished = false;
   startedAt = Date.now();
 
+  $("metaPill").textContent = `ИСМП • ${questions.length} вопросов`;
+
   renderQuestions();
   startTimer();
 
   await postEvent("start", { fio });
-  $("note").textContent = "Не закрывайте приложение до завершения теста.";
+
+  // убрали нижнюю “инфу” под кнопками в тесте
+  $("note").textContent = "";
 }
 
 function disableAllInputs() {
   document.querySelectorAll("input, button").forEach(el => {
-    if (el.id === "closeBtn" || el.id === "modalBtn") return;
+    // оставим возможность закрывать модал, если он вдруг открыт
+    if (el.id === "modalBtn") return;
     el.disabled = true;
   });
 }
@@ -397,21 +444,48 @@ async function finishTest({ reason = "manual" } = {}) {
     spentSec
   }, { beacon: false });
 
-  // 🎉 только если завершил вручную
-  if (reason === "manual") runConfetti(1800);
+  const passNeed = getPassNeed(total);
+  let passed = score >= passNeed;
 
-  const text =
-    reason === "too_many_violations"
-      ? `Тест завершён автоматически (3-й уход).\nРезультат: ${score}/${total}`
-      : reason === "time_up"
-        ? `Время вышло.\nРезультат: ${score}/${total}`
-        : `Тест завершён.\nРезультат: ${score}/${total}`;
+  // если авто-завершение по нарушениям — считаем “не сдал” всегда
+  if (reason === "too_many_violations") passed = false;
 
-  showModal("Готово", text, "Ок");
+  // 🎉 конфетти только если успешно и завершил вручную
+  if (passed && reason === "manual") runConfetti(1800);
 
-  $("note").textContent = `Ваш результат: ${score}/${total}`;
-  $("finishBtn").style.display = "none";
-  $("closeBtn").style.display = "block";
+  // Экран результата вместо модалки
+  showScreen("resultScreen");
+
+  const pct = total > 0 ? Math.round((score / total) * 100) : 0;
+
+  if (reason === "too_many_violations") {
+    $("resultTitle").textContent = "🚨 Экзамен завершён автоматически";
+    $("resultSubtitle").textContent = "Причина: превышено количество уходов из теста.";
+  } else if (reason === "time_up") {
+    $("resultTitle").textContent = passed ? "✅ Экзамен сдан" : "❌ Экзамен не сдан";
+    $("resultSubtitle").textContent = "Время истекло. Ответы зафиксированы.";
+  } else {
+    $("resultTitle").textContent = passed ? "✅ Экзамен сдан" : "❌ Экзамен не сдан";
+    $("resultSubtitle").textContent = passed
+      ? "Поздравляем! Результат выше порога."
+      : "Результат ниже порога. Попробуйте ещё раз.";
+  }
+
+  $("resultPill").textContent = `Результат: ${score}/${total} (${pct}%) • Порог: ${passNeed}/${total}`;
+
+  const reasonMap = {
+    manual: "завершено вручную",
+    time_up: "время вышло",
+    too_many_violations: "3-й уход"
+  };
+
+  $("resultMeta").textContent =
+    `ФИО: ${fio}\n` +
+    `Уходов: ${leaveCount} (blur=${blurCount}, hidden=${hiddenCount})\n` +
+    `Причина: ${reasonMap[reason] || reason}`;
+
+  // милый маскот только если успешно и не нарушения
+  $("mascotWrap").style.display = (passed && reason !== "too_many_violations") ? "block" : "none";
 }
 
 /* события анти-чита */
@@ -443,13 +517,26 @@ $("btnResidents").addEventListener("click", () => showModal("Скоро", "Ра�
 $("btnStaff").addEventListener("click", () => showModal("Скоро", "Раздел для сотрудников центра в разработке.", "Ок"));
 $("backHomeBtn").addEventListener("click", () => goHome());
 
-$("startBtn").addEventListener("click", startTest);
+$("startBtn").addEventListener("click", goRules);
+$("rulesAgreeBtn").addEventListener("click", beginTest);
+$("rulesBackBtn").addEventListener("click", () => showScreen("startScreen"));
+
 $("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
+
+// старую кнопку closeBtn оставляем (не ломаем), но она теперь не основная
 $("closeBtn").addEventListener("click", () => tg?.close?.());
+$("resultCloseBtn").addEventListener("click", () => tg?.close?.());
 
 /* init */
 (async () => {
   await ensureSid();
   await loadQuestions(); // заранее подгружаем, чтобы при старте не ждать
+
+  // если страницу перезагрузили во время теста — сохраним набор вопросов (но не продолжаем автоматически)
+  const stored = sessionStorage.getItem("activeQuestions");
+  if (stored) {
+    try { questions = JSON.parse(stored) || []; } catch {}
+  }
+
   showScreen("homeScreen");
 })();

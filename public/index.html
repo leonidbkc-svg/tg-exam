@@ -98,13 +98,6 @@
     }
     button:active { opacity: 0.88; }
 
-    .hint {
-      margin-top: 12px;
-      font-size: 13px;
-      color: #666;
-      line-height: 1.35;
-    }
-
     .q {
       margin-top: 16px;
       padding-top: 14px;
@@ -137,6 +130,7 @@
       color: #777;
       margin-top: 10px;
       line-height: 1.35;
+      white-space: pre-line; /* чтобы \n в resultMeta красиво переносились */
     }
 
     .warn {
@@ -197,10 +191,32 @@
       pointer-events: none;
       display: none;
     }
+
+    /* 🐥 милый маскот-анимация */
+    .mascot {
+      display: inline-block;
+      transform-origin: 50% 90%;
+      animation: duck-bounce 1.2s ease-in-out infinite;
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,0.18));
+    }
+    @keyframes duck-bounce {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      35%      { transform: translateY(-6px) rotate(-2deg); }
+      70%      { transform: translateY(0) rotate(2deg); }
+    }
+    .spark { transform-origin: center; }
+    .spark.s1 { animation: spark 1.0s ease-in-out infinite; }
+    .spark.s2 { animation: spark 1.2s ease-in-out infinite; }
+    .spark.s3 { animation: spark 1.15s ease-in-out infinite; }
+    .spark.s4 { animation: spark 0.95s ease-in-out infinite; }
+    @keyframes spark {
+      0%, 100% { opacity: 0.25; transform: scale(0.9); }
+      50%      { opacity: 1;    transform: scale(1.25); }
+    }
   </style>
 </head>
-<body>
 
+<body>
   <canvas id="confettiCanvas"></canvas>
 
   <div class="warn" id="warnBox"></div>
@@ -213,7 +229,7 @@
     </div>
   </div>
 
-  <!-- ✅ Новый экран выбора -->
+  <!-- ✅ Экран выбора -->
   <div class="card" id="homeScreen">
     <h1>Платформа тестирования</h1>
     <p class="sub">
@@ -225,40 +241,91 @@
     <button class="secondary" id="btnResidents">👨‍⚕️ Для ординаторов (скоро)</button>
     <button class="secondary" id="btnStaff">🏥 Для сотрудников центра (скоро)</button>
 
-    <p class="hint">
-      ⚠️ В экзаменационном режиме сворачивания/переключения фиксируются и отправляются экзаменатору.
-    </p>
+    <!-- ✅ УБРАЛИ инфо под кнопками по просьбе -->
   </div>
 
-  <!-- Ваш текущий экран ввода ФИО (оставлен как есть) -->
+  <!-- Экран ввода ФИО -->
   <div class="card" id="startScreen" style="display:none;">
     <h1>Тест по ИСМП</h1>
 
     <label for="fio">ФИО</label>
     <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
 
-    <button id="startBtn">Начать тест</button>
+    <button id="startBtn">Продолжить</button>
 
-    <p class="hint">
-      ⚠️ Экзаменационный режим: сворачивания/переключения фиксируются и отправляются экзаменатору.<br>
-      При 3-м уходе тест завершится автоматически.
-    </p>
+    <!-- ✅ УБРАЛИ инфо под кнопками по просьбе -->
 
     <button class="secondary" id="backHomeBtn">⬅️ Назад</button>
   </div>
 
+  <!-- ✅ Экран правил -->
+  <div class="card" id="rulesScreen" style="display:none;">
+    <h1>Правила экзамена</h1>
+    <p class="sub">
+      Перед началом ознакомьтесь с правилами:
+    </p>
+
+    <div class="muted" style="font-size:14px;color:#333;line-height:1.45;">
+      <div>⏱ Время: <b>5 минут</b></div>
+      <div>🧾 Вопросов: <b>10</b> (случайно из 30)</div>
+      <div>✅ Порог сдачи: <b>70%</b> (нужно ≥ <span id="passNeed">7</span> правильных)</div>
+      <div>🚫 <b>3 ухода</b> из приложения → тест завершится автоматически</div>
+      <div style="margin-top:10px;">📵 Не сворачивайте Telegram во время теста.</div>
+    </div>
+
+    <button id="rulesAgreeBtn">✅ Я ознакомился(ась), начать</button>
+    <button class="secondary" id="rulesBackBtn">⬅️ Назад</button>
+  </div>
+
+  <!-- Экран теста -->
   <div class="card" id="testScreen" style="display:none;">
     <div class="row">
       <div class="pill" id="timerPill">⏱ 05:00</div>
-      <div class="pill" id="metaPill">ИСМП • … вопросов</div>
+      <div class="pill" id="metaPill">ИСМП • 10 вопросов</div>
     </div>
 
     <div id="questions"></div>
 
     <button id="finishBtn">Завершить тест</button>
+
+    <!-- оставляем как было (не ломаем), но теперь основной выход — на экране результата -->
     <button class="secondary" id="closeBtn" style="display:none;">Закрыть</button>
 
+    <!-- оставили, но будем держать пустым -->
     <div class="muted" id="note"></div>
+  </div>
+
+  <!-- ✅ Экран результата -->
+  <div class="card" id="resultScreen" style="display:none;">
+    <h1 id="resultTitle">Результат</h1>
+    <p class="sub" id="resultSubtitle"></p>
+
+    <div id="mascotWrap" style="display:none; margin: 10px 0 14px 0; text-align:center;">
+      <div class="mascot">
+        <svg viewBox="0 0 220 140" width="220" height="140" aria-hidden="true">
+          <ellipse cx="110" cy="118" rx="70" ry="12" fill="rgba(0,0,0,0.12)"/>
+          <ellipse cx="118" cy="78" rx="62" ry="38" fill="#FFD34D"/>
+          <circle cx="70" cy="62" r="28" fill="#FFD34D"/>
+          <circle cx="56" cy="70" r="6" fill="#FFB3C1" opacity="0.75"/>
+          <circle cx="84" cy="70" r="6" fill="#FFB3C1" opacity="0.75"/>
+          <path d="M42 62 C30 62, 30 82, 46 80 C56 78, 56 64, 42 62 Z" fill="#FF9F0A"/>
+          <circle cx="74" cy="58" r="4.6" fill="#111"/>
+          <circle cx="72.5" cy="56.5" r="1.7" fill="#fff"/>
+          <path d="M132 82 C150 72, 170 76, 174 92 C160 98, 144 98, 132 82 Z" fill="#FFC933"/>
+          <path d="M150 54 L160 64 L182 40" fill="none" stroke="#34C759" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle class="spark s1" cx="30" cy="30" r="4" fill="#AF52DE"/>
+          <circle class="spark s2" cx="190" cy="24" r="4" fill="#007AFF"/>
+          <circle class="spark s3" cx="200" cy="104" r="4" fill="#FF2D55"/>
+          <circle class="spark s4" cx="34" cy="102" r="4" fill="#34C759"/>
+        </svg>
+      </div>
+      <div class="muted" style="margin-top:6px;">Ура! Экзамен сдан 🎉</div>
+    </div>
+
+    <div class="pill" id="resultPill" style="display:inline-flex; margin-bottom:10px;"></div>
+    <div class="muted" id="resultMeta"></div>
+
+    <button id="resultCloseBtn">Закрыть</button>
   </div>
 
   <script src="app.js?v=31"></script>
