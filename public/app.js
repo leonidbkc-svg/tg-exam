@@ -20,7 +20,7 @@ let timerId = null;
 let testStarted = false;
 let finished = false;
 
-let questions = [];
+let questions = []; // грузим из JSON
 
 function $(id) { return document.getElementById(id); }
 
@@ -33,17 +33,6 @@ function formatTime(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-}
-
-/**
- * ✅ Telegram initData (подпись Telegram)
- * Сервер будет валидировать и привязывать sid к user.id
- */
-function getInitData() {
-  return tg?.initData || "";
-}
-function getInitUserIdUnsafe() {
-  return tg?.initDataUnsafe?.user?.id ?? null;
 }
 
 /* модал вместо alert */
@@ -86,20 +75,7 @@ function postJSON(url, data, { beacon = true } = {}) {
 
 async function postEvent(type, payload) {
   if (!sid) return { ok: false };
-
-  // ✅ добавили initData + userIdUnsafe (на сервере userIdUnsafe не доверяется, только для логов)
-  return postJSON(
-    "/api/event",
-    {
-      sid,
-      type,
-      payload: payload || {},
-      ts: Date.now(),
-      initData: getInitData(),
-      initUserIdUnsafe: getInitUserIdUnsafe()
-    },
-    { beacon: true }
-  );
+  return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
 }
 
 /* sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
@@ -117,7 +93,6 @@ async function ensureSid() {
     return sid;
   }
 
-  // 🔙 старое поведение оставляем: сервер может создать sid
   const resp = await postJSON("/api/new-session", {}, { beacon: false });
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
@@ -132,7 +107,7 @@ async function ensureSid() {
 /* ✅ загрузка вопросов из JSON */
 async function loadQuestions() {
   try {
-    const res = await fetch(`/questions.json?v=30`, { cache: "no-store" });
+    const res = await fetch(`/questions.json?v=31`, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -261,6 +236,109 @@ async function logBlurOnly() {
   await postEvent("blur", { fio, blurCount, hiddenCount, leaveCount });
 }
 
+/* ------------------ 🎉 Confetti (хлопушка) ------------------ */
+
+let confettiRaf = null;
+
+function runConfetti(ms = 1800) {
+  const canvas = $("confettiCanvas");
+  if (!canvas) return;
+
+  const ctx = canvas.getContext("2d");
+  canvas.style.display = "block";
+
+  const resize = () => {
+    canvas.width = Math.floor(window.innerWidth * (window.devicePixelRatio || 1));
+    canvas.height = Math.floor(window.innerHeight * (window.devicePixelRatio || 1));
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+  };
+  resize();
+
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+
+  const colors = ["#ff3b30","#ffcc00","#34c759","#007aff","#af52de","#ff2d55"];
+  const particles = [];
+  const N = 140;
+
+  for (let i = 0; i < N; i++) {
+    particles.push({
+      x: W * 0.5 + (Math.random() - 0.5) * 120,
+      y: H * 0.25 + (Math.random() - 0.5) * 30,
+      vx: (Math.random() - 0.5) * 10,
+      vy: -Math.random() * 8 - 4,
+      g: 0.25 + Math.random() * 0.2,
+      rot: Math.random() * Math.PI,
+      vr: (Math.random() - 0.5) * 0.2,
+      w: 6 + Math.random() * 6,
+      h: 6 + Math.random() * 10,
+      c: colors[Math.floor(Math.random() * colors.length)],
+      life: 1
+    });
+  }
+
+  const t0 = performance.now();
+  const tick = (t) => {
+    const dt = Math.min(32, t - (tick.last || t));
+    tick.last = t;
+
+    ctx.clearRect(0, 0, W, H);
+
+    for (const p of particles) {
+      p.vy += p.g;
+      p.x += p.vx * (dt / 16);
+      p.y += p.vy * (dt / 16);
+      p.rot += p.vr * (dt / 16);
+
+      const age = (t - t0) / ms;
+      p.life = Math.max(0, 1 - age);
+
+      ctx.save();
+      ctx.globalAlpha = p.life;
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx.restore();
+    }
+
+    if (t - t0 < ms) {
+      confettiRaf = requestAnimationFrame(tick);
+    } else {
+      cancelAnimationFrame(confettiRaf);
+      confettiRaf = null;
+      canvas.style.display = "none";
+      ctx.clearRect(0, 0, W, H);
+    }
+  };
+
+  window.addEventListener("resize", resize, { once: true });
+  confettiRaf = requestAnimationFrame(tick);
+}
+
+/* ------------------ Навигация экранов ------------------ */
+
+function showScreen(which) {
+  const screens = ["homeScreen", "startScreen", "testScreen"];
+  for (const id of screens) {
+    const el = $(id);
+    if (!el) continue;
+    el.style.display = (id === which) ? "block" : "none";
+  }
+}
+
+function goHome() {
+  showScreen("homeScreen");
+}
+
+function goStudentStart() {
+  showScreen("startScreen");
+}
+
+/* ------------------ Основная логика теста ------------------ */
+
 async function startTest() {
   fio = $("fio").value.trim();
   if (!fio) return showModal("Ошибка", "Введите ФИО");
@@ -289,12 +367,7 @@ async function startTest() {
   renderQuestions();
   startTimer();
 
-  const r = await postEvent("start", { fio });
-  if (r?.ok === false && (r?.error === "initData_required" || r?.error === "user_mismatch" || r?.error === "bad_initData")) {
-    // сервер включил жёсткий режим — покажем понятное сообщение
-    showModal("Доступ ограничен", "Откройте тест через кнопку в боте и не пересылайте ссылку другим.", "Ок");
-  }
-
+  await postEvent("start", { fio });
   $("note").textContent = "Не закрывайте приложение до завершения теста.";
 }
 
@@ -318,19 +391,14 @@ async function finishTest({ reason = "manual" } = {}) {
 
   disableAllInputs();
 
-  // ✅ добавили initData в submit
-  const resp = await postJSON("/api/submit", {
+  await postJSON("/api/submit", {
     sid, fio, score, total, reason,
     blurCount, hiddenCount, leaveCount,
-    spentSec,
-    initData: getInitData(),
-    initUserIdUnsafe: getInitUserIdUnsafe()
+    spentSec
   }, { beacon: false });
 
-  if (resp?.ok === false && (resp?.error === "initData_required" || resp?.error === "user_mismatch" || resp?.error === "bad_initData")) {
-    showModal("Доступ ограничен", "Откройте тест через кнопку в боте и не пересылайте ссылку другим.", "Ок");
-    return;
-  }
+  // 🎉 только если завершил вручную
+  if (reason === "manual") runConfetti(1800);
 
   const text =
     reason === "too_many_violations"
@@ -346,7 +414,7 @@ async function finishTest({ reason = "manual" } = {}) {
   $("closeBtn").style.display = "block";
 }
 
-/* события */
+/* события анти-чита */
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
@@ -369,12 +437,19 @@ window.addEventListener("blur", () => {
   logBlurOnly();
 });
 
+/* кнопки */
+$("btnStudents").addEventListener("click", () => goStudentStart());
+$("btnResidents").addEventListener("click", () => showModal("Скоро", "Раздел для ординаторов в разработке.", "Ок"));
+$("btnStaff").addEventListener("click", () => showModal("Скоро", "Раздел для сотрудников центра в разработке.", "Ок"));
+$("backHomeBtn").addEventListener("click", () => goHome());
+
 $("startBtn").addEventListener("click", startTest);
 $("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
 $("closeBtn").addEventListener("click", () => tg?.close?.());
 
-// init
+/* init */
 (async () => {
   await ensureSid();
-  await loadQuestions();
+  await loadQuestions(); // заранее подгружаем, чтобы при старте не ждать
+  showScreen("homeScreen");
 })();

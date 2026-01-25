@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Тест по ИСМП</title>
+  <title>Платформа тестирования</title>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -14,7 +14,7 @@
       min-height: 100%;
       background-image:
         linear-gradient(rgba(0,0,0,0.18), rgba(0,0,0,0.18)),
-        url("/bg.jpg?v=30");
+        url("/bg.jpg?v=31");
       background-size: cover;
       background-position: center;
       background-repeat: no-repeat;
@@ -40,7 +40,8 @@
       -webkit-backdrop-filter: blur(6px);
     }
 
-    h1 { margin: 0 0 14px 0; font-size: 22px; }
+    h1 { margin: 0 0 10px 0; font-size: 22px; }
+    .sub { margin: 0 0 14px 0; color: #333; line-height: 1.35; font-size: 14px; }
 
     .row {
       display: flex;
@@ -80,11 +81,11 @@
     }
 
     button {
-      margin-top: 16px;
+      margin-top: 12px;
       width: 100%;
       padding: 14px;
       font-size: 17px;
-      font-weight: 700;
+      font-weight: 800;
       border-radius: 12px;
       border: none;
       background: #007aff;
@@ -93,7 +94,7 @@
     button.secondary {
       background: rgba(233,233,238,0.95);
       color: #111;
-      font-weight: 700;
+      font-weight: 800;
     }
     button:active { opacity: 0.88; }
 
@@ -187,9 +188,20 @@
 
     .modal h2 { margin: 0 0 10px 0; font-size: 18px; }
     .modal p  { margin: 0 0 14px 0; color: #333; line-height: 1.35; }
+
+    /* 🎉 confetti overlay */
+    #confettiCanvas {
+      position: fixed;
+      inset: 0;
+      z-index: 20000;
+      pointer-events: none;
+      display: none;
+    }
   </style>
 </head>
 <body>
+
+  <canvas id="confettiCanvas"></canvas>
 
   <div class="warn" id="warnBox"></div>
 
@@ -201,7 +213,25 @@
     </div>
   </div>
 
-  <div class="card" id="startScreen">
+  <!-- ✅ Новый экран выбора -->
+  <div class="card" id="homeScreen">
+    <h1>Платформа тестирования</h1>
+    <p class="sub">
+      Добро пожаловать на платформу тестирования отделения эпидемиологического надзора.<br>
+      Выберите раздел:
+    </p>
+
+    <button id="btnStudents">👩‍🎓 Тесты для студентов</button>
+    <button class="secondary" id="btnResidents">👨‍⚕️ Для ординаторов (скоро)</button>
+    <button class="secondary" id="btnStaff">🏥 Для сотрудников центра (скоро)</button>
+
+    <p class="hint">
+      ⚠️ В экзаменационном режиме сворачивания/переключения фиксируются и отправляются экзаменатору.
+    </p>
+  </div>
+
+  <!-- Ваш текущий экран ввода ФИО (оставлен как есть) -->
+  <div class="card" id="startScreen" style="display:none;">
     <h1>Тест по ИСМП</h1>
 
     <label for="fio">ФИО</label>
@@ -213,6 +243,8 @@
       ⚠️ Экзаменационный режим: сворачивания/переключения фиксируются и отправляются экзаменатору.<br>
       При 3-м уходе тест завершится автоматически.
     </p>
+
+    <button class="secondary" id="backHomeBtn">⬅️ Назад</button>
   </div>
 
   <div class="card" id="testScreen" style="display:none;">
@@ -229,6 +261,6 @@
     <div class="muted" id="note"></div>
   </div>
 
-  <script src="app.js?v=30"></script>
+  <script src="app.js?v=31"></script>
 </body>
 </html>
