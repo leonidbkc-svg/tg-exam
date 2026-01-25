@@ -20,7 +20,7 @@ let timerId = null;
 let testStarted = false;
 let finished = false;
 
-let questions = []; // ✅ теперь грузим из JSON
+let questions = [];
 
 function $(id) { return document.getElementById(id); }
 
@@ -33,6 +33,17 @@ function formatTime(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+
+/**
+ * ✅ Telegram initData (подпись Telegram)
+ * Сервер будет валидировать и привязывать sid к user.id
+ */
+function getInitData() {
+  return tg?.initData || "";
+}
+function getInitUserIdUnsafe() {
+  return tg?.initDataUnsafe?.user?.id ?? null;
 }
 
 /* модал вместо alert */
@@ -75,7 +86,20 @@ function postJSON(url, data, { beacon = true } = {}) {
 
 async function postEvent(type, payload) {
   if (!sid) return { ok: false };
-  return postJSON("/api/event", { sid, type, payload: payload || {}, ts: Date.now() }, { beacon: true });
+
+  // ✅ добавили initData + userIdUnsafe (на сервере userIdUnsafe не доверяется, только для логов)
+  return postJSON(
+    "/api/event",
+    {
+      sid,
+      type,
+      payload: payload || {},
+      ts: Date.now(),
+      initData: getInitData(),
+      initUserIdUnsafe: getInitUserIdUnsafe()
+    },
+    { beacon: true }
+  );
 }
 
 /* sid: URL -> sessionStorage -> /api/new-session (ТОЛЬКО fetch) */
@@ -93,6 +117,7 @@ async function ensureSid() {
     return sid;
   }
 
+  // 🔙 старое поведение оставляем: сервер может создать sid
   const resp = await postJSON("/api/new-session", {}, { beacon: false });
   if (resp?.ok && resp.sid) {
     sid = String(resp.sid);
@@ -114,7 +139,6 @@ async function loadQuestions() {
     const q = Array.isArray(data?.questions) ? data.questions : [];
     if (!q.length) throw new Error("questions пустой");
 
-    // минимальная валидация структуры
     for (const item of q) {
       if (!item?.id || !item?.type || !item?.text || !Array.isArray(item?.options)) {
         throw new Error("неверный формат questions.json");
@@ -241,7 +265,6 @@ async function startTest() {
   fio = $("fio").value.trim();
   if (!fio) return showModal("Ошибка", "Введите ФИО");
 
-  // гарантируем наличие вопросов
   if (!questions.length) {
     const ok = await loadQuestions();
     if (!ok) return;
@@ -266,7 +289,12 @@ async function startTest() {
   renderQuestions();
   startTimer();
 
-  await postEvent("start", { fio });
+  const r = await postEvent("start", { fio });
+  if (r?.ok === false && (r?.error === "initData_required" || r?.error === "user_mismatch" || r?.error === "bad_initData")) {
+    // сервер включил жёсткий режим — покажем понятное сообщение
+    showModal("Доступ ограничен", "Откройте тест через кнопку в боте и не пересылайте ссылку другим.", "Ок");
+  }
+
   $("note").textContent = "Не закрывайте приложение до завершения теста.";
 }
 
@@ -290,11 +318,19 @@ async function finishTest({ reason = "manual" } = {}) {
 
   disableAllInputs();
 
-  await postJSON("/api/submit", {
+  // ✅ добавили initData в submit
+  const resp = await postJSON("/api/submit", {
     sid, fio, score, total, reason,
     blurCount, hiddenCount, leaveCount,
-    spentSec
+    spentSec,
+    initData: getInitData(),
+    initUserIdUnsafe: getInitUserIdUnsafe()
   }, { beacon: false });
+
+  if (resp?.ok === false && (resp?.error === "initData_required" || resp?.error === "user_mismatch" || resp?.error === "bad_initData")) {
+    showModal("Доступ ограничен", "Откройте тест через кнопку в боте и не пересылайте ссылку другим.", "Ок");
+    return;
+  }
 
   const text =
     reason === "too_many_violations"
@@ -340,5 +376,5 @@ $("closeBtn").addEventListener("click", () => tg?.close?.());
 // init
 (async () => {
   await ensureSid();
-  await loadQuestions(); // заранее подгружаем, чтобы при старте не ждать
+  await loadQuestions();
 })();
