@@ -18,12 +18,14 @@ const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const ADMIN_TG_ID = String(process.env.ADMIN_TG_ID || "");
-const REPORT_API_KEY = process.env.REPORT_API_KEY || "";
+
+const REPORT_API_KEY = String(process.env.REPORT_API_KEY || "");
+const INGEST_API_KEY = String(process.env.INGEST_API_KEY || REPORT_API_KEY);
 
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 
-// IMPORTANT: prefer IPv4 first (doesn't break TLS host)
+// IMPORTANT: prefer IPv4 first
 try {
   dns.setDefaultResultOrder("ipv4first");
 } catch {}
@@ -118,10 +120,18 @@ function toCsv(results) {
   return lines.join("\n");
 }
 
-// ----------------- Admin auth -----------------
-function requireApiKey(req, res, next) {
+// ----------------- Auth -----------------
+function requireReportKey(req, res, next) {
+  const key = req.query.api_key || req.headers["x-api-key"];
+  if (!REPORT_API_KEY || String(key || "") !== REPORT_API_KEY) {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+  next();
+}
+
+function requireIngestKey(req, res, next) {
   const key = req.headers["x-api-key"] || req.query.api_key;
-  if (!REPORT_API_KEY || String(key || "") !== String(REPORT_API_KEY)) {
+  if (!INGEST_API_KEY || String(key || "") !== INGEST_API_KEY) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
   next();
@@ -129,146 +139,6 @@ function requireApiKey(req, res, next) {
 
 function safeBool(v) {
   return v === true || v === "true" || v === 1 || v === "1";
-}
-
-// ----------------- Telegram HTTP helper (NO fetch, pure https) -----------------
-function tgRequestJson({ method = "GET", path: reqPath, bodyObj = null }) {
-  return new Promise((resolve, reject) => {
-    const body = bodyObj ? Buffer.from(JSON.stringify(bodyObj), "utf-8") : null;
-
-    const req = https.request(
-      {
-        protocol: "https:",
-        hostname: "api.telegram.org", // KEEP HOSTNAME (TLS OK)
-        port: 443,
-        method,
-        path: reqPath,
-        agent: tgAgent, // force IPv4 in DNS lookup
-        headers: {
-          "content-type": "application/json",
-          ...(body ? { "content-length": body.length } : {}),
-        },
-        timeout: 35000,
-      },
-      (res) => {
-        let data = "";
-        res.setEncoding("utf-8");
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          try {
-            const json = JSON.parse(data || "{}");
-            resolve({ status: res.statusCode || 0, json });
-          } catch (e) {
-            reject(new Error("Bad JSON from Telegram: " + String(e?.message || e)));
-          }
-        });
-      }
-    );
-
-    req.on("timeout", () => req.destroy(new Error("Telegram request timeout")));
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-async function tgCall(methodName, params = {}) {
-  if (!BOT_TOKEN) throw new Error("BOT_TOKEN is not set");
-  const p = `/bot${BOT_TOKEN}/${methodName}`;
-  const { json } = await tgRequestJson({ method: "POST", path: p, bodyObj: params });
-  if (!json || json.ok !== true) {
-    throw new Error(`Telegram API error: ${JSON.stringify(json)}`);
-  }
-  return json.result;
-}
-
-async function tgSend(chatId, text, extra = {}) {
-  return tgCall("sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    ...extra,
-  });
-}
-
-function isAdminTgId(tgId) {
-  return ADMIN_TG_ID && String(tgId) === String(ADMIN_TG_ID);
-}
-
-// ----------------- Bot polling -----------------
-let isPolling = false;
-let pollOffset = 0;
-
-async function handleUpdate(update) {
-  const msg = update.message || update.edited_message;
-  if (!msg || !msg.text) return;
-
-  const chatId = msg.chat.id;
-  const from = msg.from || {};
-  const text = String(msg.text || "").trim();
-
-  if (text === "/start") {
-    await tgSend(
-      chatId,
-      "Привет! Это бот тестирования.\n\n" +
-        "Админ команды:\n" +
-        "• /export — ссылки на выгрузку\n" +
-        "• /whoami — покажу твой TG id"
-    );
-    return;
-  }
-
-  if (text === "/whoami") {
-    await tgSend(chatId, `id: <b>${from.id}</b>\nusername: <b>${from.username || "-"}</b>`);
-    return;
-  }
-
-  if (text === "/export") {
-    if (!isAdminTgId(from.id)) {
-      await tgSend(chatId, "⛔ Нет доступа.");
-      return;
-    }
-    const hint =
-      `✅ Экспорт:\n` +
-      `JSON: ${APP_URL}/api/admin/results?api_key=REPORT_API_KEY\n` +
-      `CSV:  ${APP_URL}/api/admin/results.csv?api_key=REPORT_API_KEY\n\n` +
-      `⚠️ Вместо REPORT_API_KEY подставь свой ключ.`;
-    await tgSend(chatId, hint);
-    return;
-  }
-
-  await tgSend(chatId, "Ок. Если нужен экспорт — /export");
-}
-
-async function pollLoop() {
-  if (!BOT_TOKEN) {
-    console.warn("BOT_TOKEN is not set. Bot polling disabled.");
-    return;
-  }
-
-  isPolling = true;
-  console.log("🤖 Bot polling started");
-
-  while (isPolling) {
-    try {
-      const p = `/bot${BOT_TOKEN}/getUpdates?timeout=25&offset=${pollOffset}`;
-      const { json } = await tgRequestJson({ method: "GET", path: p });
-
-      if (!json || json.ok !== true) {
-        throw new Error(`getUpdates failed: ${JSON.stringify(json)}`);
-      }
-
-      const updates = json.result || [];
-      for (const u of updates) {
-        pollOffset = Math.max(pollOffset, (u.update_id || 0) + 1);
-        await handleUpdate(u);
-      }
-    } catch (e) {
-      console.error("pollLoop error:", e?.message || e);
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
 }
 
 // ----------------- Express -----------------
@@ -279,23 +149,10 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
-
-// static
 app.use(express.static(path.join(__dirname, "public")));
 
-// ---- receive result (protected) ----
-/**
- * POST /api/results (x-api-key)
- * Body:
- * {
- *   exam_id, exam_title,
- *   tg: { id, username, first_name, last_name },
- *   score, max_score, duration_sec, passed,
- *   answers: [...],
- *   meta: { sid, ip, user_agent, ... }
- * }
- */
-app.post("/api/results", requireApiKey, (req, res) => {
+// ---- INGEST results (server / python) ----
+app.post("/api/results", requireIngestKey, (req, res) => {
   try {
     const b = req.body || {};
     const tg = b.tg || {};
@@ -321,18 +178,18 @@ app.post("/api/results", requireApiKey, (req, res) => {
       max_score: maxScore,
       percent,
       passed: safeBool(b.passed),
-
       duration_sec: Number.isFinite(+b.duration_sec) ? +b.duration_sec : null,
 
       answers: Array.isArray(b.answers) ? b.answers : [],
       meta: b.meta && typeof b.meta === "object" ? b.meta : {},
     };
 
-    if (STRICT_SID && !row.meta?.sid) {
-      return res.status(400).json({ ok: false, error: "sid_required" });
+    if (!row.meta.sid) {
+      row.meta.sid = `ingest:${row.id}`;
     }
-    if (REQUIRE_TG_AUTH && !row.tg_id) {
-      return res.status(400).json({ ok: false, error: "tg_required" });
+
+    if (STRICT_SID && !row.meta.sid) {
+      return res.status(400).json({ ok: false, error: "sid_required" });
     }
 
     appendResult(row);
@@ -343,35 +200,24 @@ app.post("/api/results", requireApiKey, (req, res) => {
 });
 
 // ---- admin export ----
-app.get("/api/admin/results", requireApiKey, (req, res) => {
+app.get("/api/admin/results", requireReportKey, (req, res) => {
   const from = req.query.from ? Number(req.query.from) : undefined;
   const to = req.query.to ? Number(req.query.to) : undefined;
   const tgId = req.query.tg_id ? String(req.query.tg_id) : undefined;
 
-  const results = listResults({
-    fromTs: Number.isFinite(from) ? from : undefined,
-    toTs: Number.isFinite(to) ? to : undefined,
-    tgId,
-  });
-
+  const results = listResults({ fromTs: from, toTs: to, tgId });
   res.json({ ok: true, count: results.length, results });
 });
 
-app.get("/api/admin/results.csv", requireApiKey, (req, res) => {
+app.get("/api/admin/results.csv", requireReportKey, (req, res) => {
   const from = req.query.from ? Number(req.query.from) : undefined;
   const to = req.query.to ? Number(req.query.to) : undefined;
   const tgId = req.query.tg_id ? String(req.query.tg_id) : undefined;
 
-  const results = listResults({
-    fromTs: Number.isFinite(from) ? from : undefined,
-    toTs: Number.isFinite(to) ? to : undefined,
-    tgId,
-  });
-
-  const csv = toCsv(results);
+  const results = listResults({ fromTs: from, toTs: to, tgId });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="results.csv"');
-  res.send(csv);
+  res.send(toCsv(results));
 });
 
 // ----------------- Start -----------------
@@ -379,15 +225,6 @@ app.listen(PORT, () => {
   console.log(`✅ Server started on :${PORT}`);
   console.log(`APP_URL=${APP_URL}`);
   console.log(`STRICT_SID=${STRICT_SID} REQUIRE_TG_AUTH=${REQUIRE_TG_AUTH}`);
-  console.log(`REPORT_API_KEY is ${REPORT_API_KEY ? "SET" : "NOT set"}`);
-  pollLoop().catch((e) => console.error("pollLoop fatal:", e));
-});
-
-process.on("SIGINT", () => {
-  isPolling = false;
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  isPolling = false;
-  process.exit(0);
+  console.log(`REPORT_API_KEY=${REPORT_API_KEY ? "SET" : "NOT set"}`);
+  console.log(`INGEST_API_KEY=${INGEST_API_KEY ? "SET" : "NOT set"}`);
 });
