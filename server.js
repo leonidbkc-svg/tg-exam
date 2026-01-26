@@ -1,908 +1,452 @@
-import express from "express";
-import crypto from "crypto";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-import fetch from "node-fetch";
-import dns from "dns";
+"use strict";
 
-dns.setDefaultResultOrder("ipv4first");
+/**
+ * tg-exam server.js
+ * - Express + static public/
+ * - Telegram bot polling (IPv4-only to avoid IPv6 timeouts)
+ * - Persist exam results to ./data/results.json
+ * - Admin export API protected by REPORT_API_KEY
+ */
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_TG_ID = process.env.ADMIN_TG_ID; // строкой
-const APP_URL = process.env.APP_URL;         // "https://epid-test.ru"
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const express = require("express");
+const https = require("https");
+const dns = require("dns");
 
+// IMPORTANT: prefer IPv4 results first (still keep TLS hostname)
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch (_) {}
+
+// If your project uses node-fetch in package.json, keep it:
+let fetch;
+try {
+  fetch = require("node-fetch");
+  // node-fetch v2 exports function directly
+  fetch = fetch.default || fetch;
+} catch (e) {
+  // Fallback to global fetch (Node 18+). Note: agent option won't work in undici.
+  fetch = global.fetch;
+  console.warn("node-fetch not found; using global fetch. For IPv4 agent, install node-fetch.");
+}
+
+// ====== ENV ======
+const PORT = parseInt(process.env.PORT || "3000", 10);
+const APP_URL = process.env.APP_URL || "http://localhost:" + PORT;
+
+const REPORT_API_KEY = process.env.REPORT_API_KEY || "";
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
+const ADMIN_TG_ID = String(process.env.ADMIN_TG_ID || "");
+
+// modes
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 
-// ✅ ключ для выгрузки результатов в Python-программу
-const REPORT_API_KEY = String(process.env.REPORT_API_KEY || "");
+// ====== TELEGRAM BASE ======
+const TG_API = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
 
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 6 * 60 * 60 * 1000); // 6 часов
-const CLEANUP_EVERY_MS = 10 * 60 * 1000; // 10 минут
+// IPv4-only agent for node-fetch HTTPS requests
+const tgAgent = new https.Agent({
+  keepAlive: true,
+  lookup: (hostname, opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
+});
 
-// логика пересдачи/порог
-const PASS_RATE = 0.70;
+// ====== STORAGE (JSON) ======
+const DATA_DIR = path.join(__dirname, "data");
+const RESULTS_FILE = path.join(DATA_DIR, "results.json");
 
-if (!BOT_TOKEN || !ADMIN_TG_ID || !APP_URL) {
-  console.error("❌ Не заданы BOT_TOKEN / ADMIN_TG_ID / APP_URL");
-  process.exit(1);
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(RESULTS_FILE)) {
+    fs.writeFileSync(RESULTS_FILE, JSON.stringify({ results: [] }, null, 2), "utf-8");
+  }
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+function readStore() {
+  ensureDataDir();
+  try {
+    const raw = fs.readFileSync(RESULTS_FILE, "utf-8");
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return { results: [] };
+    if (!Array.isArray(obj.results)) obj.results = [];
+    return obj;
+  } catch {
+    return { results: [] };
+  }
+}
 
-const app = express();
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
-
-/**
- * ✅ Файл-лог результатов (JSON Lines)
- * Одна строка = одна завершённая попытка
- */
-const RESULTS_FILE = path.join(__dirname, "exam_results.jsonl");
+function atomicWrite(filePath, content) {
+  const tmp = filePath + ".tmp";
+  fs.writeFileSync(tmp, content, "utf-8");
+  fs.renameSync(tmp, filePath);
+}
 
 function appendResult(row) {
-  try {
-    fs.appendFileSync(RESULTS_FILE, JSON.stringify(row) + "\n", "utf8");
-  } catch (e) {
-    console.error("appendResult failed:", e.message);
-  }
+  const store = readStore();
+  store.results.push(row);
+  atomicWrite(RESULTS_FILE, JSON.stringify(store, null, 2));
 }
 
-function readResults(limit = 10000) {
-  try {
-    if (!fs.existsSync(RESULTS_FILE)) return [];
-    const lines = fs.readFileSync(RESULTS_FILE, "utf8")
-      .split("\n")
-      .filter(Boolean);
+function listResults({ fromTs, toTs, tgId }) {
+  const store = readStore();
+  let arr = store.results.slice();
 
-    const sliced = lines.slice(Math.max(0, lines.length - limit));
-    return sliced
-      .map(l => {
-        try { return JSON.parse(l); } catch { return null; }
-      })
-      .filter(Boolean);
-  } catch (e) {
-    console.error("readResults failed:", e.message);
-    return [];
-  }
+  if (typeof fromTs === "number") arr = arr.filter((r) => (r.ts || 0) >= fromTs);
+  if (typeof toTs === "number") arr = arr.filter((r) => (r.ts || 0) <= toTs);
+  if (tgId) arr = arr.filter((r) => String(r.tg_id || "") === String(tgId));
+
+  return arr;
 }
 
-function requireReportKey(req, res, next) {
-  // если ключ не задан на сервере — лучше явно запретить, чем случайно открыть
-  if (!REPORT_API_KEY) {
-    return res.status(403).json({ ok: false, error: "report_key_not_configured" });
+// ====== HELPERS ======
+function nowTs() {
+  return Date.now();
+}
+
+function uid(prefix = "r_") {
+  return prefix + crypto.randomBytes(8).toString("hex");
+}
+
+function toCsv(results) {
+  const headers = [
+    "id",
+    "ts",
+    "date_iso",
+    "exam_id",
+    "exam_title",
+    "tg_id",
+    "tg_username",
+    "tg_first_name",
+    "tg_last_name",
+    "score",
+    "max_score",
+    "percent",
+    "passed",
+    "duration_sec",
+    "answers_json",
+    "meta_json",
+  ];
+
+  const esc = (v) => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+
+  const lines = [];
+  lines.push(headers.join(","));
+  for (const r of results) {
+    const row = [
+      r.id,
+      r.ts,
+      r.date_iso,
+      r.exam_id,
+      r.exam_title,
+      r.tg_id,
+      r.tg_username,
+      r.tg_first_name,
+      r.tg_last_name,
+      r.score,
+      r.max_score,
+      r.percent,
+      r.passed,
+      r.duration_sec,
+      JSON.stringify(r.answers || []),
+      JSON.stringify(r.meta || {}),
+    ].map(esc);
+    lines.push(row.join(","));
   }
-  const key = req.headers["x-api-key"];
-  if (!key || String(key) !== REPORT_API_KEY) {
-    return res.status(403).json({ ok: false, error: "forbidden" });
+  return lines.join("\n");
+}
+
+function requireApiKey(req, res, next) {
+  const key = req.headers["x-api-key"] || req.query.api_key;
+  if (!REPORT_API_KEY || String(key || "") !== String(REPORT_API_KEY)) {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
   }
   next();
 }
 
+function safeBool(v) {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+// ====== EXPRESS ======
+const app = express();
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// basic health
+app.get("/health", (req, res) => res.json({ ok: true, ts: nowTs() }));
+
+// static frontend (if you have it)
+app.use(express.static(path.join(__dirname, "public")));
+
+// ====== API: RECEIVE RESULT ======
 /**
- * ✅ GET /api/admin/exam-results
- * Заголовок: x-api-key: <REPORT_API_KEY>
- * Опционально:
- *  - ?limit=10000
- *  - ?since=1700000000000   (ms timestamp, отдаст только новые)
+ * POST /api/results
+ * Headers: x-api-key: REPORT_API_KEY
+ * Body example:
+ * {
+ *   exam_id: "test-1",
+ *   exam_title: "Тест по эпидрежиму",
+ *   tg: { id, username, first_name, last_name },
+ *   score: 8,
+ *   max_score: 10,
+ *   duration_sec: 123,
+ *   passed: true,
+ *   answers: [{q_id, q_text, chosen, correct, is_correct}],
+ *   meta: { sid, ip, user_agent }
+ * }
  */
-app.get("/api/admin/exam-results", requireReportKey, (req, res) => {
-  const limit = Math.max(1, Math.min(50000, Number(req.query.limit || 10000)));
-  const since = Number(req.query.since || 0);
+app.post("/api/results", requireApiKey, (req, res) => {
+  try {
+    const b = req.body || {};
+    const tg = b.tg || {};
 
-  const all = readResults(limit);
-  const filtered = since > 0 ? all.filter(r => Number(r.finishedAt || 0) >= since) : all;
+    const score = Number.isFinite(+b.score) ? +b.score : 0;
+    const maxScore = Number.isFinite(+b.max_score) ? +b.max_score : 0;
+    const percent = maxScore > 0 ? Math.round((score / maxScore) * 1000) / 10 : 0;
 
-  return res.json({ ok: true, total: filtered.length, results: filtered });
+    const row = {
+      id: uid("res_"),
+      ts: nowTs(),
+      date_iso: new Date().toISOString(),
+
+      exam_id: String(b.exam_id || ""),
+      exam_title: String(b.exam_title || ""),
+
+      tg_id: tg.id != null ? String(tg.id) : "",
+      tg_username: tg.username ? String(tg.username) : "",
+      tg_first_name: tg.first_name ? String(tg.first_name) : "",
+      tg_last_name: tg.last_name ? String(tg.last_name) : "",
+
+      score,
+      max_score: maxScore,
+      percent,
+      passed: safeBool(b.passed),
+
+      duration_sec: Number.isFinite(+b.duration_sec) ? +b.duration_sec : null,
+
+      answers: Array.isArray(b.answers) ? b.answers : [],
+      meta: (b.meta && typeof b.meta === "object") ? b.meta : {},
+    };
+
+    // optional strict mode: require SID in meta
+    if (STRICT_SID && !row.meta?.sid) {
+      return res.status(400).json({ ok: false, error: "sid_required" });
+    }
+
+    // optional require tg auth: require tg_id
+    if (REQUIRE_TG_AUTH && !row.tg_id) {
+      return res.status(400).json({ ok: false, error: "tg_required" });
+    }
+
+    appendResult(row);
+    return res.json({ ok: true, id: row.id });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ====== API: ADMIN EXPORT ======
+/**
+ * GET /api/admin/results
+ * Headers: x-api-key: REPORT_API_KEY
+ * Query: from=timestamp_ms&to=timestamp_ms&tg_id=...
+ */
+app.get("/api/admin/results", requireApiKey, (req, res) => {
+  const from = req.query.from ? Number(req.query.from) : undefined;
+  const to = req.query.to ? Number(req.query.to) : undefined;
+  const tgId = req.query.tg_id ? String(req.query.tg_id) : undefined;
+
+  const results = listResults({
+    fromTs: Number.isFinite(from) ? from : undefined,
+    toTs: Number.isFinite(to) ? to : undefined,
+    tgId,
+  });
+
+  res.json({ ok: true, count: results.length, results });
 });
 
 /**
- * sessions: Map<sid, session>
+ * GET /api/admin/results.csv
+ * Headers: x-api-key: REPORT_API_KEY
+ * Query: from=...&to=...&tg_id=...
  */
-const sessions = new Map();
+app.get("/api/admin/results.csv", requireApiKey, (req, res) => {
+  const from = req.query.from ? Number(req.query.from) : undefined;
+  const to = req.query.to ? Number(req.query.to) : undefined;
+  const tgId = req.query.tg_id ? String(req.query.tg_id) : undefined;
 
-// attempt counters per tgUserId
-const attemptsByUser = new Map();
+  const results = listResults({
+    fromTs: Number.isFinite(from) ? from : undefined,
+    toTs: Number.isFinite(to) ? to : undefined,
+    tgId,
+  });
 
-const TG_API = `https://149.154.167.220/bot${BOT_TOKEN}`; // Telegram API IPv4
+  const csv = toCsv(results);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="results.csv"');
+  res.send(csv);
+});
 
+// ====== TELEGRAM BOT (POLLING) ======
+let isPolling = false;
+let pollOffset = 0;
 
-async function tg(method, payload) {
-  const res = await fetch(`${TG_API}/${method}`, {
+async function tgCall(method, params) {
+  if (!TG_API) throw new Error("BOT_TOKEN is not set");
+
+  const url = `${TG_API}/${method}`;
+  const opts = {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params || {}),
+  };
+
+  // node-fetch supports agent; global fetch (undici) doesn't
+  if (opts && typeof opts === "object" && fetch && fetch.name !== "fetch") {
+    opts.agent = tgAgent;
+  } else if (fetch && fetch !== global.fetch) {
+    opts.agent = tgAgent;
+  }
+
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => null);
+  if (!j || j.ok !== true) {
+    throw new Error(`Telegram API error: ${JSON.stringify(j)}`);
+  }
+  return j.result;
+}
+
+async function tgSend(chatId, text, extra) {
+  return tgCall("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...(extra || {}),
   });
-  const data = await res.json().catch(() => null);
-  if (!data?.ok) {
-    const msg = data?.description ? `Telegram error: ${data.description}` : "Telegram error";
-    throw new Error(msg);
-  }
-  return data.result;
 }
 
-async function sendAdmin(text, reply_markup = undefined) {
-  try {
-    await tg("sendMessage", { chat_id: ADMIN_TG_ID, text, reply_markup });
-  } catch (e) {
-    console.error("sendAdmin failed:", e.message);
-  }
+function isAdminTgId(tgId) {
+  if (!ADMIN_TG_ID) return false;
+  return String(tgId) === String(ADMIN_TG_ID);
 }
-
-function newSid() {
-  return crypto.randomBytes(16).toString("hex");
-}
-
-function makeWebAppUrl(sid) {
-  return `${APP_URL}/?sid=${encodeURIComponent(sid)}`;
-}
-
-function buildStartKeyboard(sid) {
-  return {
-    inline_keyboard: [
-      [{ text: "✅ Начать тест", web_app: { url: makeWebAppUrl(sid) } }],
-      [{ text: "🔄 Новый сеанс", callback_data: "NEW_SESSION" }]
-    ]
-  };
-}
-
-function buildRetakeDecisionKeyboard(sid) {
-  return {
-    inline_keyboard: [
-      [{ text: "✅ Разрешить пересдачу", callback_data: `RET_OK:${sid}` }],
-      [{ text: "❌ Отказать", callback_data: `RET_NO:${sid}` }]
-    ]
-  };
-}
-
-function buildRetakeStartKeyboard(sid) {
-  return {
-    inline_keyboard: [[{ text: "✅ Начать пересдачу", web_app: { url: makeWebAppUrl(sid) } }]]
-  };
-}
-
-// ---------------- Admin helpers ----------------
-
-function isAdmin(userId) {
-  return String(userId) === String(ADMIN_TG_ID);
-}
-
-function fmtTime(ts) {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  return d.toISOString().replace("T", " ").slice(0, 19);
-}
-
-function getNextAttemptNo(tgUserId) {
-  if (!tgUserId) return 1;
-  const k = String(tgUserId);
-  const prev = Number(attemptsByUser.get(k) || 0);
-  const next = prev + 1;
-  attemptsByUser.set(k, next);
-  return next;
-}
-
-function sessionSummaryLine(s) {
-  const fio = s.fio || "—";
-  const score = (s.score != null && s.total != null) ? `${s.score}/${s.total}` : "—";
-  const leaves = Number.isFinite(Number(s.leaveCount)) ? Number(s.leaveCount) : 0;
-  const status = s.finishedAt ? "✅" : "🕓";
-  const sidShort = (s.sid || "").slice(0, 6);
-  const attempt = s.attemptNo ? `попытка#${s.attemptNo}` : "попытка#—";
-  return `${status} ${fio} | ${score} | уходов=${leaves} | ${attempt} | sid=${sidShort}… | end=${fmtTime(s.finishedAt)}`;
-}
-
-function getSessionsSorted() {
-  return Array.from(sessions.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-}
-
-function buildAdminMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "📊 Сводка", callback_data: "ADM_SUMMARY" }],
-      [{ text: "🧾 Последние 10 (удаление)", callback_data: "ADM_LAST_10" }]
-    ]
-  };
-}
-
-function buildBackToMenuKeyboard() {
-  return { inline_keyboard: [[{ text: "⬅️ Назад в меню", callback_data: "ADM_MENU" }]] };
-}
-
-function buildLast10WithDeleteKeyboard(list) {
-  const rows = list.map(s => {
-    const sidShort = (s.sid || "").slice(0, 6);
-    const fio = (s.fio || "—").slice(0, 18);
-    return [{ text: `🗑 ${fio} (${sidShort}…)`, callback_data: `ADM_DEL:${s.sid}` }];
-  });
-
-  rows.push([{ text: "⬅️ Назад в меню", callback_data: "ADM_MENU" }]);
-  return { inline_keyboard: rows };
-}
-
-function buildConfirmDeleteKeyboard(sid) {
-  return {
-    inline_keyboard: [
-      [{ text: "⚠️ Да, удалить", callback_data: `ADM_DEL_DO:${sid}` }],
-      [{ text: "Отмена", callback_data: "ADM_LAST_10" }]
-    ]
-  };
-}
-
-// ---------------- Telegram initData verification (HMAC) ----------------
-
-function verifyTelegramInitData(initData, { maxAgeSec = 24 * 60 * 60 } = {}) {
-  try {
-    if (!initData || typeof initData !== "string") return { ok: false, error: "no_initData" };
-
-    const params = new URLSearchParams(initData);
-    const hash = params.get("hash");
-    if (!hash) return { ok: false, error: "no_hash" };
-
-    const pairs = [];
-    for (const [key, val] of params.entries()) {
-      if (key === "hash") continue;
-      pairs.push([key, val]);
-    }
-    pairs.sort((a, b) => a[0].localeCompare(b[0]));
-
-    const dataCheckString = pairs.map(([k, v]) => `${k}=${v}`).join("\n");
-
-    const secretKey = crypto.createHash("sha256").update(BOT_TOKEN).digest();
-    const hmac = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
-
-    if (hmac !== hash) return { ok: false, error: "bad_hash" };
-
-    const authDate = Number(params.get("auth_date") || 0);
-    if (authDate > 0) {
-      const ageSec = Math.floor(Date.now() / 1000) - authDate;
-      if (ageSec > maxAgeSec) return { ok: false, error: "auth_date_expired" };
-    }
-
-    const userRaw = params.get("user");
-    let user = null;
-    if (userRaw) {
-      try { user = JSON.parse(userRaw); } catch { user = null; }
-    }
-
-    return { ok: true, user, authDate };
-  } catch {
-    return { ok: false, error: "verify_exception" };
-  }
-}
-
-function getSessionOrFallbackCreate(sid) {
-  const existing = sessions.get(sid);
-  if (existing) return { session: existing, created: false };
-
-  if (!STRICT_SID) {
-    const s = {
-      sid,
-      createdAt: Date.now(),
-      fio: null,
-      blurCount: 0,
-      hiddenCount: 0,
-      leaveCount: 0,
-      events: [],
-      attemptNo: 1,
-      retakeStatus: null
-    };
-    sessions.set(sid, s);
-    return { session: s, created: true };
-  }
-
-  return { session: null, created: false };
-}
-
-function isFinished(s) {
-  return Boolean(s?.finishedAt);
-}
-
-function calcPassed(score, total) {
-  const t = Number(total || 0);
-  if (!t) return false;
-  const need = Math.ceil(t * PASS_RATE);
-  return Number(score || 0) >= need;
-}
-
-// ---------------- Bot polling ----------------
-
-let offset = 0;
-let polling = false;
 
 async function handleUpdate(update) {
-  if (update.message) {
-    const msg = update.message;
-    const chatId = msg.chat.id;
-    const userId = msg.from?.id;
-    const text = (msg.text || "").trim();
+  const msg = update.message || update.edited_message;
+  if (!msg || !msg.text) return;
 
-    if (text === "/start") {
-      const sid = newSid();
-      const attemptNo = getNextAttemptNo(userId);
+  const chatId = msg.chat.id;
+  const from = msg.from || {};
+  const text = String(msg.text || "").trim();
 
-      sessions.set(sid, {
-        sid,
-        createdAt: Date.now(),
-        tgUserId: userId,
-        tgChatId: chatId,
-        boundUserId: null,
-        fio: null,
-        blurCount: 0,
-        hiddenCount: 0,
-        leaveCount: 0,
-        startedAt: null,
-        finishedAt: null,
-        score: null,
-        total: null,
-        reason: null,
-        events: [],
-        attemptNo,
-        retakeStatus: null
-      });
-
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text:
-          "Привет! Это тест по ИСМП.\n\n" +
-          "Нажми кнопку ниже, введи ФИО и проходи тест.\n" +
-          "⚠️ Сворачивания/переключения фиксируются.\n" +
-          "🚫 На 3-м уходе тест завершится автоматически.\n" +
-          `🧾 Попытка: ${attemptNo}`,
-        reply_markup: buildStartKeyboard(sid)
-      });
-      return;
-    }
-
-    if (text === "/admin") {
-      if (!isAdmin(userId)) {
-        await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
-        return;
-      }
-
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "🔐 Админ-меню",
-        reply_markup: buildAdminMenuKeyboard()
-      });
-      return;
-    }
-
-    if (text === "/last10") {
-      if (!isAdmin(userId)) {
-        await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." });
-        return;
-      }
-      const last = getSessionsSorted().slice(0, 10);
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "Последние 10:\n" + (last.length ? last.map(sessionSummaryLine).join("\n") : "Пока пусто.")
-      });
-      return;
-    }
+  if (text === "/start") {
+    await tgSend(
+      chatId,
+      "Привет! Это бот тестирования.\n\n" +
+        "• Если ты проходишь тест — просто следуй ссылке/инструкции.\n" +
+        "• Админ: /export"
+    );
+    return;
   }
 
-  if (update.callback_query) {
-    const cq = update.callback_query;
-    const chatId = cq.message?.chat?.id;
-    const userId = cq.from?.id;
-    const data = cq.data || "";
-    if (!chatId) return;
-
-    try { await tg("answerCallbackQuery", { callback_query_id: cq.id }); } catch {}
-
-    // ---- обычные кнопки для всех ----
-    if (data === "NEW_SESSION") {
-      const sid = newSid();
-      const attemptNo = getNextAttemptNo(userId);
-
-      sessions.set(sid, {
-        sid,
-        createdAt: Date.now(),
-        tgUserId: userId,
-        tgChatId: chatId,
-        boundUserId: null,
-        fio: null,
-        blurCount: 0,
-        hiddenCount: 0,
-        leaveCount: 0,
-        startedAt: null,
-        finishedAt: null,
-        score: null,
-        total: null,
-        reason: null,
-        events: [],
-        attemptNo,
-        retakeStatus: null
-      });
-
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: `Ок, создал новый сеанс. Попытка: ${attemptNo}. Жми кнопку:`,
-        reply_markup: buildStartKeyboard(sid)
-      });
+  if (text === "/export") {
+    if (!isAdminTgId(from.id)) {
+      await tgSend(chatId, "⛔ Нет доступа.");
       return;
     }
-
-    // ---- admin кнопки (ТОЛЬКО ВЫ) ----
-    if (data.startsWith("ADM_") || data.startsWith("RET_")) {
-      if (!isAdmin(userId)) {
-        try { await tg("sendMessage", { chat_id: chatId, text: "Нет доступа." }); } catch {}
-        return;
-      }
-
-      const messageId = cq.message?.message_id;
-
-      const edit = async (text, reply_markup) => {
-        try {
-          await tg("editMessageText", {
-            chat_id: chatId,
-            message_id: messageId,
-            text,
-            reply_markup
-          });
-        } catch {
-          await tg("sendMessage", { chat_id: chatId, text, reply_markup });
-        }
-      };
-
-      if (data === "ADM_MENU") {
-        await edit("🔐 Админ-меню", buildAdminMenuKeyboard());
-        return;
-      }
-
-      if (data === "ADM_SUMMARY") {
-        const list = getSessionsSorted();
-        const total = list.length;
-        const finished = list.filter(s => s.finishedAt).length;
-
-        const top = list
-          .filter(s => Number.isFinite(Number(s.score)) && Number.isFinite(Number(s.total)) && Number(s.total) > 0)
-          .sort((a, b) => (Number(b.score) / Number(b.total)) - (Number(a.score) / Number(a.total)))
-          .slice(0, 7)
-          .map((s, i) => `${i + 1}) ${(s.fio || "—")} — ${s.score}/${s.total} (уходов=${s.leaveCount || 0}) (попытка#${s.attemptNo || "—"})`)
-          .join("\n") || "—";
-
-        await edit(
-          `📊 Сводка\n` +
-          `Всего сессий: ${total}\n` +
-          `Завершено: ${finished}\n\n` +
-          `🏆 Топ:\n${top}`,
-          buildBackToMenuKeyboard()
-        );
-        return;
-      }
-
-      if (data === "ADM_LAST_10") {
-        const last = getSessionsSorted().slice(0, 10);
-        const text = "🧾 Последние 10:\n" + (last.length ? last.map(sessionSummaryLine).join("\n") : "Пока пусто.");
-        await edit(text, buildLast10WithDeleteKeyboard(last));
-        return;
-      }
-
-      if (data.startsWith("ADM_DEL:")) {
-        const sid = data.split(":")[1] || "";
-        const s = sessions.get(sid);
-        const fio = s?.fio || "—";
-        const sidShort = sid.slice(0, 10);
-        await edit(
-          `⚠️ Удалить попытку?\nФИО: ${fio}\nsid: ${sidShort}…`,
-          buildConfirmDeleteKeyboard(sid)
-        );
-        return;
-      }
-
-      if (data.startsWith("ADM_DEL_DO:")) {
-        const sid = data.split(":")[1] || "";
-        const existed = sessions.delete(sid);
-        await edit(existed ? "🗑 Удалено." : "ℹ️ Уже удалено.", buildBackToMenuKeyboard());
-        return;
-      }
-
-      // ✅ решение по пересдаче
-      if (data.startsWith("RET_OK:")) {
-        const oldSid = data.split(":")[1] || "";
-        const s = sessions.get(oldSid);
-
-        if (!s) {
-          await edit("ℹ️ Сессия не найдена (возможно, истекла по TTL).", buildBackToMenuKeyboard());
-          return;
-        }
-
-        if (!s.tgChatId || !s.tgUserId) {
-          s.retakeStatus = "approved_nochat";
-          sessions.set(oldSid, s);
-          await edit("⚠️ Пересдача одобрена, но у сессии нет tgChatId/tgUserId — не могу отправить студенту кнопку.", buildBackToMenuKeyboard());
-          return;
-        }
-
-        const newSessionSid = newSid();
-        const attemptNo = getNextAttemptNo(s.tgUserId);
-
-        sessions.set(newSessionSid, {
-          sid: newSessionSid,
-          createdAt: Date.now(),
-          tgUserId: s.tgUserId,
-          tgChatId: s.tgChatId,
-          boundUserId: null,
-          fio: null,
-          blurCount: 0,
-          hiddenCount: 0,
-          leaveCount: 0,
-          startedAt: null,
-          finishedAt: null,
-          score: null,
-          total: null,
-          reason: null,
-          events: [],
-          attemptNo,
-          retakeStatus: null
-        });
-
-        s.retakeStatus = "approved";
-        s.retakeApprovedAt = Date.now();
-        s.retakeNewSid = newSessionSid;
-        sessions.set(oldSid, s);
-
-        try {
-          await tg("sendMessage", {
-            chat_id: s.tgChatId,
-            text: `✅ Пересдача одобрена.\nПопытка: ${attemptNo}\nНажмите кнопку ниже, чтобы начать.`,
-            reply_markup: buildRetakeStartKeyboard(newSessionSid)
-          });
-        } catch (e) {
-          console.error("send retake start to student failed:", e.message);
-        }
-
-        await edit(
-          `✅ Пересдача одобрена.\n` +
-          `ФИО: ${s.fio || "—"}\n` +
-          `Старая сессия: ${oldSid}\n` +
-          `Новая сессия: ${newSessionSid}\n` +
-          `Новая попытка: ${attemptNo}`,
-          buildBackToMenuKeyboard()
-        );
-        return;
-      }
-
-      if (data.startsWith("RET_NO:")) {
-        const oldSid = data.split(":")[1] || "";
-        const s = sessions.get(oldSid);
-
-        if (!s) {
-          await edit("ℹ️ Сессия не найдена (возможно, истекла по TTL).", buildBackToMenuKeyboard());
-          return;
-        }
-
-        s.retakeStatus = "denied";
-        s.retakeDeniedAt = Date.now();
-        sessions.set(oldSid, s);
-
-        if (s.tgChatId) {
-          try {
-            await tg("sendMessage", {
-              chat_id: s.tgChatId,
-              text: "❌ Пересдача не одобрена экзаменатором."
-            });
-          } catch (e) {
-            console.error("send retake denied to student failed:", e.message);
-          }
-        }
-
-        await edit(
-          `❌ Пересдача отклонена.\nФИО: ${s.fio || "—"}\nСессия: ${oldSid}`,
-          buildBackToMenuKeyboard()
-        );
-        return;
-      }
-    }
+    // Give an admin link to export (requires REPORT_API_KEY)
+    const hint =
+      `✅ Экспорт:\n` +
+      `JSON: ${APP_URL}/api/admin/results?api_key=REPORT_API_KEY\n` +
+      `CSV:  ${APP_URL}/api/admin/results.csv?api_key=REPORT_API_KEY\n\n` +
+      `⚠️ Вместо REPORT_API_KEY подставь свой ключ.`;
+    await tgSend(chatId, hint);
+    return;
   }
+
+  if (text.startsWith("/whoami")) {
+    await tgSend(
+      chatId,
+      `id: <b>${from.id}</b>\nusername: <b>${from.username || "-"}</b>`
+    );
+    return;
+  }
+
+  // any other message
+  await tgSend(chatId, "Я понял. Если нужен экспорт — /export");
 }
 
 async function pollLoop() {
-  if (polling) return;
-  polling = true;
+  if (!BOT_TOKEN) {
+    console.warn("BOT_TOKEN is not set. Bot polling disabled.");
+    return;
+  }
+  if (!fetch) {
+    console.warn("fetch is not available. Bot polling disabled.");
+    return;
+  }
 
+  isPolling = true;
   console.log("🤖 Bot polling started");
 
-  while (true) {
+  while (isPolling) {
     try {
-      const res = await fetch(`${TG_API}/getUpdates?timeout=25&offset=${offset}`);
-      const data = await res.json();
-      if (!data.ok) {
-        console.error("getUpdates error:", data.description);
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
+      const url = `${TG_API}/getUpdates?timeout=25&offset=${pollOffset}`;
+
+      const opts = {
+        method: "GET",
+        headers: { "content-type": "application/json" },
+      };
+
+      // node-fetch: use agent to force IPv4
+      if (fetch && fetch !== global.fetch) opts.agent = tgAgent;
+
+      const r = await fetch(url, opts);
+      const j = await r.json().catch(() => null);
+
+      if (!j || j.ok !== true) {
+        throw new Error(`getUpdates failed: ${JSON.stringify(j)}`);
       }
 
-      for (const upd of data.result) {
-        offset = Math.max(offset, upd.update_id + 1);
-        await handleUpdate(upd);
+      const updates = j.result || [];
+      for (const u of updates) {
+        pollOffset = Math.max(pollOffset, (u.update_id || 0) + 1);
+        await handleUpdate(u);
       }
     } catch (e) {
-      console.error("pollLoop error:", e.message);
+      console.error("pollLoop error:", e && e.message ? e.message : e);
+      // small backoff
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
 }
 
-// cleanup
-setInterval(() => {
-  const now = Date.now();
-  for (const [sid, s] of sessions.entries()) {
-    const base = s.finishedAt || s.createdAt || now;
-    if (now - base > SESSION_TTL_MS) sessions.delete(sid);
-  }
-}, CLEANUP_EVERY_MS);
+// ====== START SERVER ======
+ensureDataDir();
 
-// ---------------- HTTP API ----------------
-
-app.get("/health", (req, res) => res.json({
-  ok: true,
-  strictSid: STRICT_SID,
-  requireTgAuth: REQUIRE_TG_AUTH
-}));
-
-app.post("/api/new-session", (req, res) => {
-  const sid = newSid();
-  sessions.set(sid, {
-    sid,
-    createdAt: Date.now(),
-    fio: null,
-    blurCount: 0,
-    hiddenCount: 0,
-    leaveCount: 0,
-    events: [],
-    attemptNo: 1,
-    retakeStatus: null
-  });
-  return res.json({ ok: true, sid });
-});
-
-app.post("/api/event", async (req, res) => {
-  try {
-    const { sid, type, payload, ts, initData } = req.body || {};
-    if (!sid || !type) return res.status(400).json({ ok: false, error: "bad_request" });
-
-    const { session: s } = getSessionOrFallbackCreate(sid);
-    if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
-
-    // Telegram auth binding for bot-created sessions
-    if (s.tgUserId) {
-      if (initData) {
-        const vr = verifyTelegramInitData(initData);
-        if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-        } else {
-          const uid = vr.user?.id;
-          if (uid != null) {
-            s.boundUserId = String(uid);
-            if (String(uid) !== String(s.tgUserId)) {
-              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
-              await sendAdmin(`⚠️ Возможная подмена пользователя\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}\ntype=${type}`);
-            }
-          }
-        }
-      } else if (REQUIRE_TG_AUTH) {
-        return res.status(401).json({ ok: false, error: "initData_required" });
-      }
-    }
-
-    const when = ts || Date.now();
-    const p = payload || {};
-    s.events = s.events || [];
-    s.events.push({ type, payload: p, ts: when });
-
-    if (type === "start" && p?.fio) {
-      s.fio = String(p.fio).trim().slice(0, 120);
-      s.startedAt = Date.now();
-      sessions.set(sid, s);
-
-      await sendAdmin(
-        `✅ Регистрация/старт\n` +
-        `ФИО: ${s.fio}\n` +
-        `Попытка: ${s.attemptNo || "—"}\n` +
-        `sid: ${sid}\n` +
-        (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
-      );
-      return res.json({ ok: true });
-    }
-
-    if (type === "blur") {
-      const next = Number.isFinite(Number(p?.blurCount)) ? Number(p.blurCount) : (Number(s.blurCount || 0) + 1);
-      s.blurCount = next;
-    }
-
-    if (type === "hidden") {
-      const next = Number.isFinite(Number(p?.hiddenCount)) ? Number(p.hiddenCount) : (Number(s.hiddenCount || 0) + 1);
-      s.hiddenCount = next;
-    }
-
-    if (p?.leaveCount != null && Number.isFinite(Number(p.leaveCount))) {
-      s.leaveCount = Number(p.leaveCount);
-    }
-
-    sessions.set(sid, s);
-
-    if (type === "hidden") {
-      const fio = s.fio || "ФИО не введено";
-      const leaves = Number(s.leaveCount || 0);
-      const status = leaves >= 3 ? "🚫 3-й уход — авто-завершение" : "⚠️ уход из теста";
-
-      await sendAdmin(
-        `${status}\n` +
-        `ФИО: ${fio}\n` +
-        `Попытка: ${s.attemptNo || "—"}\n` +
-        `sid: ${sid}\n` +
-        `событие: hidden\n` +
-        `уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
-        (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
-      );
-
-      return res.json({ ok: true, shouldFinish: leaves >= 3 });
-    }
-
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("api/event error:", e?.message || e);
-    return res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
-
-app.post("/api/submit", async (req, res) => {
-  try {
-    const { sid, fio, score, total, reason, blurCount, hiddenCount, leaveCount, spentSec, initData } = req.body || {};
-    if (!sid) return res.status(400).json({ ok: false, error: "bad_request" });
-
-    const { session: s } = getSessionOrFallbackCreate(sid);
-    if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
-
-    if (isFinished(s)) return res.json({ ok: true, alreadyFinished: true });
-
-    // Telegram auth binding for bot-created sessions
-    if (s.tgUserId) {
-      if (initData) {
-        const vr = verifyTelegramInitData(initData);
-        if (!vr.ok) {
-          if (REQUIRE_TG_AUTH) return res.status(401).json({ ok: false, error: "bad_initData", detail: vr.error });
-        } else {
-          const uid = vr.user?.id;
-          if (uid != null) {
-            s.boundUserId = String(uid);
-            if (String(uid) !== String(s.tgUserId)) {
-              if (REQUIRE_TG_AUTH) return res.status(403).json({ ok: false, error: "user_mismatch" });
-              await sendAdmin(`⚠️ Возможная подмена пользователя (submit)\nsid: ${sid}\nожидался tgUserId=${s.tgUserId}\nпришёл user.id=${uid}`);
-            }
-          }
-        }
-      } else if (REQUIRE_TG_AUTH) {
-        return res.status(401).json({ ok: false, error: "initData_required" });
-      }
-    }
-
-    if (fio) s.fio = String(fio).trim().slice(0, 120);
-    if (Number.isFinite(Number(blurCount))) s.blurCount = Number(blurCount);
-    if (Number.isFinite(Number(hiddenCount))) s.hiddenCount = Number(hiddenCount);
-    if (Number.isFinite(Number(leaveCount))) s.leaveCount = Number(leaveCount);
-
-    s.score = Number(score ?? 0);
-    s.total = Number(total ?? 0);
-    s.reason = String(reason || "manual");
-    s.finishedAt = Date.now();
-    sessions.set(sid, s);
-
-    const reasonMap = {
-      manual: "завершил вручную",
-      time_up: "время вышло",
-      too_many_violations: "авто-завершение (3-й уход)"
-    };
-
-    const passed = (s.reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
-    const passText = passed ? "✅ СДАН" : "❌ НЕ СДАН";
-
-    // ✅ пишем в файл (для Python)
-    appendResult({
-      sid: s.sid,
-      fio: s.fio || "",
-      score: s.score ?? null,
-      total: s.total ?? null,
-      passed,
-      reason: s.reason,
-      attemptNo: s.attemptNo ?? null,
-
-      leaveCount: s.leaveCount ?? 0,
-      blurCount: s.blurCount ?? 0,
-      hiddenCount: s.hiddenCount ?? 0,
-      spentSec: (spentSec != null ? Number(spentSec) : null),
-
-      startedAt: s.startedAt ?? null,
-      finishedAt: s.finishedAt ?? null,
-
-      tgUserId: s.tgUserId ?? null,
-      tgChatId: s.tgChatId ?? null,
-      boundUserId: s.boundUserId ?? null
-    });
-
-    const fioText = s.fio || "ФИО не введено";
-    const leaves = Number(s.leaveCount || 0);
-
-    await sendAdmin(
-      `🏁 Тест завершён (${passText})\n` +
-      `ФИО: ${fioText}\n` +
-      `Попытка: ${s.attemptNo || "—"}\n` +
-      `Результат: ${s.score}/${s.total}\n` +
-      `Причина: ${reasonMap[s.reason] || s.reason}\n` +
-      `Уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
-      (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
-      `sid: ${sid}\n` +
-      (s.boundUserId ? `user.id: ${s.boundUserId}` : "")
-    );
-
-    return res.json({ ok: true, passed });
-  } catch (e) {
-    console.error("api/submit error:", e?.message || e);
-    return res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
-
-/**
- * ✅ Запрос на пересдачу от студента
- */
-app.post("/api/retake-request", async (req, res) => {
-  try {
-    const { sid, fio, score, total, reason } = req.body || {};
-    if (!sid) return res.status(400).json({ ok: false, error: "bad_request" });
-
-    const s = sessions.get(sid);
-    if (!s) return res.status(404).json({ ok: false, error: "unknown_sid" });
-
-    // пересдача только если тест завершён
-    if (!s.finishedAt) return res.status(400).json({ ok: false, error: "not_finished" });
-
-    // если нарушения — не даём пересдачу через кнопку
-    if (String(reason || s.reason || "") === "too_many_violations") {
-      return res.status(403).json({ ok: false, error: "violations_no_retake" });
-    }
-
-    // если сдал — тоже не надо
-    const passed = calcPassed(score ?? s.score, total ?? s.total);
-    if (passed) return res.status(400).json({ ok: false, error: "already_passed" });
-
-    if (s.retakeStatus === "pending") return res.json({ ok: true, status: "pending_already" });
-    if (s.retakeStatus === "approved") return res.json({ ok: true, status: "approved_already" });
-
-    s.retakeStatus = "pending";
-    s.retakeRequestedAt = Date.now();
-    sessions.set(sid, s);
-
-    const fioText = (fio || s.fio || "ФИО не введено");
-    const scr = (score != null && total != null) ? `${score}/${total}` : `${s.score ?? "—"}/${s.total ?? "—"}`;
-
-    await sendAdmin(
-      `📩 Запрос на пересдачу\n` +
-      `ФИО: ${fioText}\n` +
-      `Попытка: ${s.attemptNo || "—"}\n` +
-      `Результат: ${scr}\n` +
-      `sid: ${sid}\n` +
-      (s.tgUserId ? `tgUserId: ${s.tgUserId}\n` : "") +
-      (s.tgChatId ? `tgChatId: ${s.tgChatId}\n` : ""),
-      buildRetakeDecisionKeyboard(sid)
-    );
-
-    return res.json({ ok: true, status: "pending" });
-  } catch (e) {
-    console.error("api/retake-request error:", e?.message || e);
-    return res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
-
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`✅ Server started on :${PORT}`);
   console.log(`APP_URL=${APP_URL}`);
   console.log(`STRICT_SID=${STRICT_SID} REQUIRE_TG_AUTH=${REQUIRE_TG_AUTH}`);
-  console.log(`REPORT_API_KEY is ${REPORT_API_KEY ? "SET" : "EMPTY"}`);
-  pollLoop();
+  console.log(`REPORT_API_KEY is ${REPORT_API_KEY ? "SET" : "NOT set"}`);
+
+  // start bot polling
+  pollLoop().catch((e) => console.error("pollLoop fatal:", e));
+});
+
+// graceful stop
+process.on("SIGINT", () => {
+  isPolling = false;
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  isPolling = false;
+  process.exit(0);
 });
