@@ -1,6 +1,7 @@
 import express from "express";
 import crypto from "crypto";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 import dns from "dns";
@@ -14,6 +15,9 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
+
+// ✅ ключ для выгрузки результатов в Python-программу
+const REPORT_API_KEY = String(process.env.REPORT_API_KEY || "");
 
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 6 * 60 * 60 * 1000); // 6 часов
 const CLEANUP_EVERY_MS = 10 * 60 * 1000; // 10 минут
@@ -32,6 +36,68 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
+
+/**
+ * ✅ Файл-лог результатов (JSON Lines)
+ * Одна строка = одна завершённая попытка
+ */
+const RESULTS_FILE = path.join(__dirname, "exam_results.jsonl");
+
+function appendResult(row) {
+  try {
+    fs.appendFileSync(RESULTS_FILE, JSON.stringify(row) + "\n", "utf8");
+  } catch (e) {
+    console.error("appendResult failed:", e.message);
+  }
+}
+
+function readResults(limit = 10000) {
+  try {
+    if (!fs.existsSync(RESULTS_FILE)) return [];
+    const lines = fs.readFileSync(RESULTS_FILE, "utf8")
+      .split("\n")
+      .filter(Boolean);
+
+    const sliced = lines.slice(Math.max(0, lines.length - limit));
+    return sliced
+      .map(l => {
+        try { return JSON.parse(l); } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch (e) {
+    console.error("readResults failed:", e.message);
+    return [];
+  }
+}
+
+function requireReportKey(req, res, next) {
+  // если ключ не задан на сервере — лучше явно запретить, чем случайно открыть
+  if (!REPORT_API_KEY) {
+    return res.status(403).json({ ok: false, error: "report_key_not_configured" });
+  }
+  const key = req.headers["x-api-key"];
+  if (!key || String(key) !== REPORT_API_KEY) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
+  }
+  next();
+}
+
+/**
+ * ✅ GET /api/admin/exam-results
+ * Заголовок: x-api-key: <REPORT_API_KEY>
+ * Опционально:
+ *  - ?limit=10000
+ *  - ?since=1700000000000   (ms timestamp, отдаст только новые)
+ */
+app.get("/api/admin/exam-results", requireReportKey, (req, res) => {
+  const limit = Math.max(1, Math.min(50000, Number(req.query.limit || 10000)));
+  const since = Number(req.query.since || 0);
+
+  const all = readResults(limit);
+  const filtered = since > 0 ? all.filter(r => Number(r.finishedAt || 0) >= since) : all;
+
+  return res.json({ ok: true, total: filtered.length, results: filtered });
+});
 
 /**
  * sessions: Map<sid, session>
@@ -97,7 +163,7 @@ function buildRetakeStartKeyboard(sid) {
   };
 }
 
-// ---------------- Admin helpers (ТОЛЬКО ДЛЯ ВАС) ----------------
+// ---------------- Admin helpers ----------------
 
 function isAdmin(userId) {
   return String(userId) === String(ADMIN_TG_ID);
@@ -271,6 +337,7 @@ async function handleUpdate(update) {
         finishedAt: null,
         score: null,
         total: null,
+        reason: null,
         events: [],
         attemptNo,
         retakeStatus: null
@@ -345,6 +412,7 @@ async function handleUpdate(update) {
         finishedAt: null,
         score: null,
         total: null,
+        reason: null,
         events: [],
         attemptNo,
         retakeStatus: null
@@ -467,6 +535,7 @@ async function handleUpdate(update) {
           finishedAt: null,
           score: null,
           total: null,
+          reason: null,
           events: [],
           attemptNo,
           retakeStatus: null
@@ -720,11 +789,9 @@ app.post("/api/submit", async (req, res) => {
 
     s.score = Number(score ?? 0);
     s.total = Number(total ?? 0);
+    s.reason = String(reason || "manual");
     s.finishedAt = Date.now();
     sessions.set(sid, s);
-
-    const fioText = s.fio || "ФИО не введено";
-    const leaves = Number(s.leaveCount || 0);
 
     const reasonMap = {
       manual: "завершил вручную",
@@ -732,15 +799,41 @@ app.post("/api/submit", async (req, res) => {
       too_many_violations: "авто-завершение (3-й уход)"
     };
 
-    const passed = (reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
+    const passed = (s.reason !== "too_many_violations") ? calcPassed(s.score, s.total) : false;
     const passText = passed ? "✅ СДАН" : "❌ НЕ СДАН";
+
+    // ✅ пишем в файл (для Python)
+    appendResult({
+      sid: s.sid,
+      fio: s.fio || "",
+      score: s.score ?? null,
+      total: s.total ?? null,
+      passed,
+      reason: s.reason,
+      attemptNo: s.attemptNo ?? null,
+
+      leaveCount: s.leaveCount ?? 0,
+      blurCount: s.blurCount ?? 0,
+      hiddenCount: s.hiddenCount ?? 0,
+      spentSec: (spentSec != null ? Number(spentSec) : null),
+
+      startedAt: s.startedAt ?? null,
+      finishedAt: s.finishedAt ?? null,
+
+      tgUserId: s.tgUserId ?? null,
+      tgChatId: s.tgChatId ?? null,
+      boundUserId: s.boundUserId ?? null
+    });
+
+    const fioText = s.fio || "ФИО не введено";
+    const leaves = Number(s.leaveCount || 0);
 
     await sendAdmin(
       `🏁 Тест завершён (${passText})\n` +
       `ФИО: ${fioText}\n` +
       `Попытка: ${s.attemptNo || "—"}\n` +
       `Результат: ${s.score}/${s.total}\n` +
-      `Причина: ${reasonMap[reason] || (reason || "manual")}\n` +
+      `Причина: ${reasonMap[s.reason] || s.reason}\n` +
       `Уходов: ${leaves} (blur=${s.blurCount || 0}, hidden=${s.hiddenCount || 0})\n` +
       (spentSec != null ? `Время: ${spentSec} сек\n` : "") +
       `sid: ${sid}\n` +
@@ -768,7 +861,7 @@ app.post("/api/retake-request", async (req, res) => {
     // пересдача только если тест завершён
     if (!s.finishedAt) return res.status(400).json({ ok: false, error: "not_finished" });
 
-    // если нарушения — не даём пересдачу через кнопку (чтобы античит имел смысл)
+    // если нарушения — не даём пересдачу через кнопку
     if (String(reason || s.reason || "") === "too_many_violations") {
       return res.status(403).json({ ok: false, error: "violations_no_retake" });
     }
@@ -809,5 +902,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server started on :${PORT}`);
   console.log(`APP_URL=${APP_URL}`);
   console.log(`STRICT_SID=${STRICT_SID} REQUIRE_TG_AUTH=${REQUIRE_TG_AUTH}`);
+  console.log(`REPORT_API_KEY is ${REPORT_API_KEY ? "SET" : "EMPTY"}`);
   pollLoop();
 });
