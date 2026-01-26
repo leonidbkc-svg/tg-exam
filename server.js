@@ -1,59 +1,40 @@
-"use strict";
+// server.js (ESM because package.json has "type": "module")
 
-/**
- * tg-exam server.js
- * - Express + static public/
- * - Telegram bot polling (IPv4-only to avoid IPv6 timeouts)
- * - Persist exam results to ./data/results.json
- * - Admin export API protected by REPORT_API_KEY
- */
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import https from "https";
+import dns from "dns";
+import express from "express";
+import { fileURLToPath } from "url";
 
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-const express = require("express");
-const https = require("https");
-const dns = require("dns");
+// ----------------- ESM __dirname -----------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// IMPORTANT: prefer IPv4 results first (still keep TLS hostname)
-try {
-  dns.setDefaultResultOrder("ipv4first");
-} catch (_) {}
-
-// If your project uses node-fetch in package.json, keep it:
-let fetch;
-try {
-  fetch = require("node-fetch");
-  // node-fetch v2 exports function directly
-  fetch = fetch.default || fetch;
-} catch (e) {
-  // Fallback to global fetch (Node 18+). Note: agent option won't work in undici.
-  fetch = global.fetch;
-  console.warn("node-fetch not found; using global fetch. For IPv4 agent, install node-fetch.");
-}
-
-// ====== ENV ======
+// ----------------- ENV -----------------
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const APP_URL = process.env.APP_URL || "http://localhost:" + PORT;
+const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
-const REPORT_API_KEY = process.env.REPORT_API_KEY || "";
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const ADMIN_TG_ID = String(process.env.ADMIN_TG_ID || "");
+const REPORT_API_KEY = process.env.REPORT_API_KEY || "";
 
-// modes
 const STRICT_SID = String(process.env.STRICT_SID || "0") === "1";
 const REQUIRE_TG_AUTH = String(process.env.REQUIRE_TG_AUTH || "0") === "1";
 
-// ====== TELEGRAM BASE ======
-const TG_API = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
+// IMPORTANT: prefer IPv4 first (doesn't break TLS host)
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {}
 
-// IPv4-only agent for node-fetch HTTPS requests
+// ----------------- IPv4-only HTTPS agent -----------------
 const tgAgent = new https.Agent({
   keepAlive: true,
   lookup: (hostname, opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
 });
 
-// ====== STORAGE (JSON) ======
+// ----------------- Storage -----------------
 const DATA_DIR = path.join(__dirname, "data");
 const RESULTS_FILE = path.join(DATA_DIR, "results.json");
 
@@ -83,13 +64,17 @@ function atomicWrite(filePath, content) {
   fs.renameSync(tmp, filePath);
 }
 
+function uid(prefix = "res_") {
+  return prefix + crypto.randomBytes(8).toString("hex");
+}
+
 function appendResult(row) {
   const store = readStore();
   store.results.push(row);
   atomicWrite(RESULTS_FILE, JSON.stringify(store, null, 2));
 }
 
-function listResults({ fromTs, toTs, tgId }) {
+function listResults({ fromTs, toTs, tgId } = {}) {
   const store = readStore();
   let arr = store.results.slice();
 
@@ -100,33 +85,14 @@ function listResults({ fromTs, toTs, tgId }) {
   return arr;
 }
 
-// ====== HELPERS ======
-function nowTs() {
-  return Date.now();
-}
-
-function uid(prefix = "r_") {
-  return prefix + crypto.randomBytes(8).toString("hex");
-}
-
 function toCsv(results) {
   const headers = [
-    "id",
-    "ts",
-    "date_iso",
-    "exam_id",
-    "exam_title",
-    "tg_id",
-    "tg_username",
-    "tg_first_name",
-    "tg_last_name",
-    "score",
-    "max_score",
-    "percent",
-    "passed",
+    "id","ts","date_iso",
+    "exam_id","exam_title",
+    "tg_id","tg_username","tg_first_name","tg_last_name",
+    "score","max_score","percent","passed",
     "duration_sec",
-    "answers_json",
-    "meta_json",
+    "answers_json","meta_json",
   ];
 
   const esc = (v) => {
@@ -136,23 +102,13 @@ function toCsv(results) {
     return s;
   };
 
-  const lines = [];
-  lines.push(headers.join(","));
+  const lines = [headers.join(",")];
   for (const r of results) {
     const row = [
-      r.id,
-      r.ts,
-      r.date_iso,
-      r.exam_id,
-      r.exam_title,
-      r.tg_id,
-      r.tg_username,
-      r.tg_first_name,
-      r.tg_last_name,
-      r.score,
-      r.max_score,
-      r.percent,
-      r.passed,
+      r.id, r.ts, r.date_iso,
+      r.exam_id, r.exam_title,
+      r.tg_id, r.tg_username, r.tg_first_name, r.tg_last_name,
+      r.score, r.max_score, r.percent, r.passed,
       r.duration_sec,
       JSON.stringify(r.answers || []),
       JSON.stringify(r.meta || {}),
@@ -162,6 +118,7 @@ function toCsv(results) {
   return lines.join("\n");
 }
 
+// ----------------- Admin auth -----------------
 function requireApiKey(req, res, next) {
   const key = req.headers["x-api-key"] || req.query.api_key;
   if (!REPORT_API_KEY || String(key || "") !== String(REPORT_API_KEY)) {
@@ -174,32 +131,168 @@ function safeBool(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
 
-// ====== EXPRESS ======
+// ----------------- Telegram HTTP helper (NO fetch, pure https) -----------------
+function tgRequestJson({ method = "GET", path: reqPath, bodyObj = null }) {
+  return new Promise((resolve, reject) => {
+    const body = bodyObj ? Buffer.from(JSON.stringify(bodyObj), "utf-8") : null;
+
+    const req = https.request(
+      {
+        protocol: "https:",
+        hostname: "api.telegram.org", // KEEP HOSTNAME (TLS OK)
+        port: 443,
+        method,
+        path: reqPath,
+        agent: tgAgent, // force IPv4 in DNS lookup
+        headers: {
+          "content-type": "application/json",
+          ...(body ? { "content-length": body.length } : {}),
+        },
+        timeout: 35000,
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf-8");
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(data || "{}");
+            resolve({ status: res.statusCode || 0, json });
+          } catch (e) {
+            reject(new Error("Bad JSON from Telegram: " + String(e?.message || e)));
+          }
+        });
+      }
+    );
+
+    req.on("timeout", () => req.destroy(new Error("Telegram request timeout")));
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function tgCall(methodName, params = {}) {
+  if (!BOT_TOKEN) throw new Error("BOT_TOKEN is not set");
+  const p = `/bot${BOT_TOKEN}/${methodName}`;
+  const { json } = await tgRequestJson({ method: "POST", path: p, bodyObj: params });
+  if (!json || json.ok !== true) {
+    throw new Error(`Telegram API error: ${JSON.stringify(json)}`);
+  }
+  return json.result;
+}
+
+async function tgSend(chatId, text, extra = {}) {
+  return tgCall("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...extra,
+  });
+}
+
+function isAdminTgId(tgId) {
+  return ADMIN_TG_ID && String(tgId) === String(ADMIN_TG_ID);
+}
+
+// ----------------- Bot polling -----------------
+let isPolling = false;
+let pollOffset = 0;
+
+async function handleUpdate(update) {
+  const msg = update.message || update.edited_message;
+  if (!msg || !msg.text) return;
+
+  const chatId = msg.chat.id;
+  const from = msg.from || {};
+  const text = String(msg.text || "").trim();
+
+  if (text === "/start") {
+    await tgSend(
+      chatId,
+      "Привет! Это бот тестирования.\n\n" +
+        "Админ команды:\n" +
+        "• /export — ссылки на выгрузку\n" +
+        "• /whoami — покажу твой TG id"
+    );
+    return;
+  }
+
+  if (text === "/whoami") {
+    await tgSend(chatId, `id: <b>${from.id}</b>\nusername: <b>${from.username || "-"}</b>`);
+    return;
+  }
+
+  if (text === "/export") {
+    if (!isAdminTgId(from.id)) {
+      await tgSend(chatId, "⛔ Нет доступа.");
+      return;
+    }
+    const hint =
+      `✅ Экспорт:\n` +
+      `JSON: ${APP_URL}/api/admin/results?api_key=REPORT_API_KEY\n` +
+      `CSV:  ${APP_URL}/api/admin/results.csv?api_key=REPORT_API_KEY\n\n` +
+      `⚠️ Вместо REPORT_API_KEY подставь свой ключ.`;
+    await tgSend(chatId, hint);
+    return;
+  }
+
+  await tgSend(chatId, "Ок. Если нужен экспорт — /export");
+}
+
+async function pollLoop() {
+  if (!BOT_TOKEN) {
+    console.warn("BOT_TOKEN is not set. Bot polling disabled.");
+    return;
+  }
+
+  isPolling = true;
+  console.log("🤖 Bot polling started");
+
+  while (isPolling) {
+    try {
+      const p = `/bot${BOT_TOKEN}/getUpdates?timeout=25&offset=${pollOffset}`;
+      const { json } = await tgRequestJson({ method: "GET", path: p });
+
+      if (!json || json.ok !== true) {
+        throw new Error(`getUpdates failed: ${JSON.stringify(json)}`);
+      }
+
+      const updates = json.result || [];
+      for (const u of updates) {
+        pollOffset = Math.max(pollOffset, (u.update_id || 0) + 1);
+        await handleUpdate(u);
+      }
+    } catch (e) {
+      console.error("pollLoop error:", e?.message || e);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+// ----------------- Express -----------------
+ensureDataDir();
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// basic health
-app.get("/health", (req, res) => res.json({ ok: true, ts: nowTs() }));
+app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// static frontend (if you have it)
+// static
 app.use(express.static(path.join(__dirname, "public")));
 
-// ====== API: RECEIVE RESULT ======
+// ---- receive result (protected) ----
 /**
- * POST /api/results
- * Headers: x-api-key: REPORT_API_KEY
- * Body example:
+ * POST /api/results (x-api-key)
+ * Body:
  * {
- *   exam_id: "test-1",
- *   exam_title: "Тест по эпидрежиму",
+ *   exam_id, exam_title,
  *   tg: { id, username, first_name, last_name },
- *   score: 8,
- *   max_score: 10,
- *   duration_sec: 123,
- *   passed: true,
- *   answers: [{q_id, q_text, chosen, correct, is_correct}],
- *   meta: { sid, ip, user_agent }
+ *   score, max_score, duration_sec, passed,
+ *   answers: [...],
+ *   meta: { sid, ip, user_agent, ... }
  * }
  */
 app.post("/api/results", requireApiKey, (req, res) => {
@@ -213,7 +306,7 @@ app.post("/api/results", requireApiKey, (req, res) => {
 
     const row = {
       id: uid("res_"),
-      ts: nowTs(),
+      ts: Date.now(),
       date_iso: new Date().toISOString(),
 
       exam_id: String(b.exam_id || ""),
@@ -232,15 +325,12 @@ app.post("/api/results", requireApiKey, (req, res) => {
       duration_sec: Number.isFinite(+b.duration_sec) ? +b.duration_sec : null,
 
       answers: Array.isArray(b.answers) ? b.answers : [],
-      meta: (b.meta && typeof b.meta === "object") ? b.meta : {},
+      meta: b.meta && typeof b.meta === "object" ? b.meta : {},
     };
 
-    // optional strict mode: require SID in meta
     if (STRICT_SID && !row.meta?.sid) {
       return res.status(400).json({ ok: false, error: "sid_required" });
     }
-
-    // optional require tg auth: require tg_id
     if (REQUIRE_TG_AUTH && !row.tg_id) {
       return res.status(400).json({ ok: false, error: "tg_required" });
     }
@@ -252,12 +342,7 @@ app.post("/api/results", requireApiKey, (req, res) => {
   }
 });
 
-// ====== API: ADMIN EXPORT ======
-/**
- * GET /api/admin/results
- * Headers: x-api-key: REPORT_API_KEY
- * Query: from=timestamp_ms&to=timestamp_ms&tg_id=...
- */
+// ---- admin export ----
 app.get("/api/admin/results", requireApiKey, (req, res) => {
   const from = req.query.from ? Number(req.query.from) : undefined;
   const to = req.query.to ? Number(req.query.to) : undefined;
@@ -272,11 +357,6 @@ app.get("/api/admin/results", requireApiKey, (req, res) => {
   res.json({ ok: true, count: results.length, results });
 });
 
-/**
- * GET /api/admin/results.csv
- * Headers: x-api-key: REPORT_API_KEY
- * Query: from=...&to=...&tg_id=...
- */
 app.get("/api/admin/results.csv", requireApiKey, (req, res) => {
   const from = req.query.from ? Number(req.query.from) : undefined;
   const to = req.query.to ? Number(req.query.to) : undefined;
@@ -294,154 +374,15 @@ app.get("/api/admin/results.csv", requireApiKey, (req, res) => {
   res.send(csv);
 });
 
-// ====== TELEGRAM BOT (POLLING) ======
-let isPolling = false;
-let pollOffset = 0;
-
-async function tgCall(method, params) {
-  if (!TG_API) throw new Error("BOT_TOKEN is not set");
-
-  const url = `${TG_API}/${method}`;
-  const opts = {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(params || {}),
-  };
-
-  // node-fetch supports agent; global fetch (undici) doesn't
-  if (opts && typeof opts === "object" && fetch && fetch.name !== "fetch") {
-    opts.agent = tgAgent;
-  } else if (fetch && fetch !== global.fetch) {
-    opts.agent = tgAgent;
-  }
-
-  const r = await fetch(url, opts);
-  const j = await r.json().catch(() => null);
-  if (!j || j.ok !== true) {
-    throw new Error(`Telegram API error: ${JSON.stringify(j)}`);
-  }
-  return j.result;
-}
-
-async function tgSend(chatId, text, extra) {
-  return tgCall("sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    ...(extra || {}),
-  });
-}
-
-function isAdminTgId(tgId) {
-  if (!ADMIN_TG_ID) return false;
-  return String(tgId) === String(ADMIN_TG_ID);
-}
-
-async function handleUpdate(update) {
-  const msg = update.message || update.edited_message;
-  if (!msg || !msg.text) return;
-
-  const chatId = msg.chat.id;
-  const from = msg.from || {};
-  const text = String(msg.text || "").trim();
-
-  if (text === "/start") {
-    await tgSend(
-      chatId,
-      "Привет! Это бот тестирования.\n\n" +
-        "• Если ты проходишь тест — просто следуй ссылке/инструкции.\n" +
-        "• Админ: /export"
-    );
-    return;
-  }
-
-  if (text === "/export") {
-    if (!isAdminTgId(from.id)) {
-      await tgSend(chatId, "⛔ Нет доступа.");
-      return;
-    }
-    // Give an admin link to export (requires REPORT_API_KEY)
-    const hint =
-      `✅ Экспорт:\n` +
-      `JSON: ${APP_URL}/api/admin/results?api_key=REPORT_API_KEY\n` +
-      `CSV:  ${APP_URL}/api/admin/results.csv?api_key=REPORT_API_KEY\n\n` +
-      `⚠️ Вместо REPORT_API_KEY подставь свой ключ.`;
-    await tgSend(chatId, hint);
-    return;
-  }
-
-  if (text.startsWith("/whoami")) {
-    await tgSend(
-      chatId,
-      `id: <b>${from.id}</b>\nusername: <b>${from.username || "-"}</b>`
-    );
-    return;
-  }
-
-  // any other message
-  await tgSend(chatId, "Я понял. Если нужен экспорт — /export");
-}
-
-async function pollLoop() {
-  if (!BOT_TOKEN) {
-    console.warn("BOT_TOKEN is not set. Bot polling disabled.");
-    return;
-  }
-  if (!fetch) {
-    console.warn("fetch is not available. Bot polling disabled.");
-    return;
-  }
-
-  isPolling = true;
-  console.log("🤖 Bot polling started");
-
-  while (isPolling) {
-    try {
-      const url = `${TG_API}/getUpdates?timeout=25&offset=${pollOffset}`;
-
-      const opts = {
-        method: "GET",
-        headers: { "content-type": "application/json" },
-      };
-
-      // node-fetch: use agent to force IPv4
-      if (fetch && fetch !== global.fetch) opts.agent = tgAgent;
-
-      const r = await fetch(url, opts);
-      const j = await r.json().catch(() => null);
-
-      if (!j || j.ok !== true) {
-        throw new Error(`getUpdates failed: ${JSON.stringify(j)}`);
-      }
-
-      const updates = j.result || [];
-      for (const u of updates) {
-        pollOffset = Math.max(pollOffset, (u.update_id || 0) + 1);
-        await handleUpdate(u);
-      }
-    } catch (e) {
-      console.error("pollLoop error:", e && e.message ? e.message : e);
-      // small backoff
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
-}
-
-// ====== START SERVER ======
-ensureDataDir();
-
+// ----------------- Start -----------------
 app.listen(PORT, () => {
   console.log(`✅ Server started on :${PORT}`);
   console.log(`APP_URL=${APP_URL}`);
   console.log(`STRICT_SID=${STRICT_SID} REQUIRE_TG_AUTH=${REQUIRE_TG_AUTH}`);
   console.log(`REPORT_API_KEY is ${REPORT_API_KEY ? "SET" : "NOT set"}`);
-
-  // start bot polling
   pollLoop().catch((e) => console.error("pollLoop fatal:", e));
 });
 
-// graceful stop
 process.on("SIGINT", () => {
   isPolling = false;
   process.exit(0);
