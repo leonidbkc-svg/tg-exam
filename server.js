@@ -107,7 +107,8 @@ const sessions = new Map();
 // attempt counters per tgUserId
 const attemptsByUser = new Map();
 
-const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const TG_API = `https://149.154.167.220/bot${BOT_TOKEN}`; // Telegram API IPv4
+
 
 async function tg(method, payload) {
   const res = await fetch(`${TG_API}/${method}`, {
