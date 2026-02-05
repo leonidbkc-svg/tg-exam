@@ -345,6 +345,24 @@ function getAnswersMap() {
   return res;
 }
 
+function buildDetailedAnswers(answersMap) {
+  return questions.map((q, idx) => {
+    const selectedIds = (answersMap[q.id] || []).slice();
+    const selectedTexts = q.options
+      .filter(o => selectedIds.includes(o.id))
+      .map(o => o.text);
+
+    return {
+      index: idx + 1,
+      question_text: q.text,
+      type: q.type,
+      options: q.options.map(o => ({ id: o.id, text: o.text })),
+      selected_ids: selectedIds,
+      selected_texts: selectedTexts
+    };
+  });
+}
+
 function calcScore(answersMap) {
   let score = 0;
   questions.forEach(q => {
@@ -591,13 +609,15 @@ async function finishTest({ reason = "manual" } = {}) {
   const score = calcScore(answers);
   const total = questions.length;
   const spentSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  const answersDetailed = buildDetailedAnswers(answers);
 
   disableTestInputsOnly();
 
   await postJSON("/api/submit", {
     sid, fio, score, total, reason,
     blurCount, hiddenCount, leaveCount,
-    spentSec
+    spentSec,
+    answers: answersDetailed
   }, { beacon: false });
 
   const passNeed = getPassNeed(total);
