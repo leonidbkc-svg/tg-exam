@@ -42,9 +42,8 @@ function cleanWatermarkText(s) {
 
 function getWatermarkText() {
   const fioText = cleanWatermarkText(fio) || "no-fio";
-  const sidTail = cleanWatermarkText(sid).slice(-6) || "nosid";
-  const stamp = watermarkStamp || new Date().toISOString().slice(0, 16).replace("T", " ");
-  return `${fioText} | ${stamp} | ${sidTail}`;
+  const stamp = watermarkStamp || new Date().toISOString().slice(0, 10);
+  return `${fioText} | ${stamp}`;
 }
 
 function renderWatermark() {
