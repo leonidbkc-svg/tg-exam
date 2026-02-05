@@ -1,10 +1,10 @@
-const tg = window.Telegram?.WebApp;
+﻿const tg = window.Telegram?.WebApp;
 tg?.expand?.();
 
-const TEST_DURATION_SEC = 5 * 60;
+const TEST_DURATION_SEC = 10 * 60;
 const AUTO_FINISH_AT = 3;
 
-const QUESTIONS_PER_TEST = 10;
+const QUESTIONS_PER_TEST = 15;
 const PASS_RATE = 0.70; // 70%
 
 let sid = "";
@@ -23,16 +23,64 @@ let timerId = null;
 let testStarted = false;
 let finished = false;
 
-let allQuestions = [];   // полный пул из JSON (30)
-let questions = [];      // активные вопросы текущего теста (10)
+let allQuestions = [];   // РїРѕР»РЅС‹Р№ РїСѓР» РёР· JSON (30)
+let questions = [];      // Р°РєС‚РёРІРЅС‹Рµ РІРѕРїСЂРѕСЃС‹ С‚РµРєСѓС‰РµРіРѕ С‚РµСЃС‚Р° (10)
 
 let lastResult = null;
+let watermarkStamp = "";
+let modalResolve = null;
 
-// оверлей “возврат в тест”
+// РѕРІРµСЂР»РµР№ вЂњРІРѕР·РІСЂР°С‚ РІ С‚РµСЃС‚вЂќ
 let returnOverlayTimer = null;
 let returnOverlayHideTimer = null;
 
 function $(id) { return document.getElementById(id); }
+
+function cleanWatermarkText(s) {
+  return String(s || "").replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+function getWatermarkText() {
+  const fioText = cleanWatermarkText(fio) || "no-fio";
+  const sidTail = cleanWatermarkText(sid).slice(-6) || "nosid";
+  const stamp = watermarkStamp || new Date().toISOString().slice(0, 16).replace("T", " ");
+  return `${fioText} | ${stamp} | ${sidTail}`;
+}
+
+function renderWatermark() {
+  const layer = $("watermarkLayer");
+  if (!layer) return;
+
+  const text = getWatermarkText();
+  const width = Math.max(window.innerWidth, 560);
+  const height = Math.max(window.innerHeight, 700);
+  const stepX = 260;
+  const stepY = 130;
+
+  layer.innerHTML = "";
+  let row = 0;
+  for (let y = -150; y < height + 180; y += stepY) {
+    const offset = row % 2 === 0 ? -80 : 80;
+    for (let x = -280 + offset; x < width + 300; x += stepX) {
+      const el = document.createElement("div");
+      el.className = "watermark-item";
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.textContent = text;
+      layer.appendChild(el);
+    }
+    row += 1;
+  }
+
+  layer.classList.add("active");
+}
+
+function hideWatermark() {
+  const layer = $("watermarkLayer");
+  if (!layer) return;
+  layer.classList.remove("active");
+  layer.innerHTML = "";
+}
 
 function getSidFromUrl() {
   const sp = new URLSearchParams(window.location.search);
@@ -53,6 +101,31 @@ function shuffleInPlace(arr) {
   return arr;
 }
 
+/* вњ… СѓРјРЅС‹Р№ (Р±Р°Р»Р°РЅСЃРЅС‹Р№) СЂР°РЅРґРѕРј */
+function pickBalancedQuestions(pool, total) {
+  const n = pool.length;
+  if (n <= total) return pickTestQuestions(pool, total);
+
+  const partSize = Math.floor(n / 3);
+
+  const first = pool.slice(0, partSize);
+  const middle = pool.slice(partSize, partSize * 2);
+  const last = pool.slice(partSize * 2);
+
+  const perBlock = Math.floor(total / 3);
+  let picked = [];
+
+  picked = picked.concat(pickTestQuestions(first, perBlock));
+  picked = picked.concat(pickTestQuestions(middle, perBlock));
+  picked = picked.concat(
+    pickTestQuestions(last, total - picked.length)
+  );
+
+  // С„РёРЅР°Р»СЊРЅС‹Р№ shuffle, С‡С‚РѕР±С‹ РЅРµ С€Р»Рё Р±Р»РѕРєР°РјРё
+  shuffleInPlace(picked);
+  return picked;
+}
+
 function pickTestQuestions(pool, n) {
   const copy = pool.map(q => ({
     ...q,
@@ -68,19 +141,51 @@ function getPassNeed(total) {
   return Math.ceil(total * PASS_RATE);
 }
 
-/* модал вместо alert */
+/* РјРѕРґР°Р» РІРјРµСЃС‚Рѕ alert */
 function showModal(title, text, btnText = "Понятно") {
+  modalResolve = null;
   $("modalTitle").textContent = title;
   $("modalText").textContent = text;
   $("modalBtn").textContent = btnText;
+  $("modalCancel").style.display = "none";
   $("modalBackdrop").style.display = "flex";
+}
+function confirmModal(title, text, okText = "Да, завершить", cancelText = "Отмена") {
+  return new Promise((resolve) => {
+    modalResolve = resolve;
+    $("modalTitle").textContent = title;
+    $("modalText").textContent = text;
+    $("modalBtn").textContent = okText;
+    $("modalCancel").textContent = cancelText;
+    $("modalCancel").style.display = "inline-block";
+    $("modalBackdrop").style.display = "flex";
+  });
 }
 function hideModal() {
   $("modalBackdrop").style.display = "none";
 }
-$("modalBtn").addEventListener("click", hideModal);
+$("modalBtn").addEventListener("click", () => {
+  if (typeof modalResolve === "function") {
+    const resolve = modalResolve;
+    modalResolve = null;
+    hideModal();
+    resolve(true);
+    return;
+  }
+  hideModal();
+});
+$("modalCancel").addEventListener("click", () => {
+  if (typeof modalResolve === "function") {
+    const resolve = modalResolve;
+    modalResolve = null;
+    hideModal();
+    resolve(false);
+    return;
+  }
+  hideModal();
+});
 
-/* ✅ оверлей “возврат/выход зафиксирован” */
+/* вњ… РѕРІРµСЂР»РµР№ вЂњРІРѕР·РІСЂР°С‚/РІС‹С…РѕРґ Р·Р°С„РёРєСЃРёСЂРѕРІР°РЅвЂќ */
 function showReturnOverlay() {
   const backdrop = $("returnBackdrop");
   const title = $("returnTitle");
@@ -91,7 +196,7 @@ function showReturnOverlay() {
   title.textContent = "Выход из теста зафиксирован";
   text.textContent =
     `Уходов: ${leaveCount} из ${AUTO_FINISH_AT}\n` +
-    (left > 0 ? `Осталось попыток: ${left}` : `Дальше — автозавершение`);
+    (left > 0 ? `Осталось попыток: ${left}` : `Дальше - автозавершение`);
 
   backdrop.classList.remove("fadeout");
   backdrop.style.display = "flex";
@@ -155,7 +260,7 @@ async function ensureSid() {
   return "";
 }
 
-/* ✅ загрузка вопросов */
+/* вњ… Р·Р°РіСЂСѓР·РєР° РІРѕРїСЂРѕСЃРѕРІ */
 async function loadQuestions() {
   try {
     const res = await fetch(`/questions.json?v=31`, { cache: "no-store" });
@@ -193,6 +298,15 @@ function renderQuestions() {
     title.className = "q-title";
     title.textContent = `${idx + 1}. ${q.text}`;
     block.appendChild(title);
+
+    if (q.type !== "single") {
+      const multiHint = document.createElement("div");
+      multiHint.className = "muted";
+      multiHint.style.marginTop = "0";
+      multiHint.style.marginBottom = "8px";
+      multiHint.textContent = "Выберите несколько вариантов ответа";
+      block.appendChild(multiHint);
+    }
 
     const answers = document.createElement("div");
     answers.className = "answers";
@@ -248,17 +362,17 @@ function calcScore(answersMap) {
 }
 
 function startTimer() {
-  $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
+  $("timerPill").textContent = `вЏ± ${formatTime(timeLeft)}`;
   timerId = setInterval(() => {
     if (finished) return;
     timeLeft -= 1;
     if (timeLeft <= 0) {
       timeLeft = 0;
-      $("timerPill").textContent = `⏱ 00:00`;
+      $("timerPill").textContent = `вЏ± 00:00`;
       finishTest({ reason: "time_up" });
       return;
     }
-    $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
+    $("timerPill").textContent = `вЏ± ${formatTime(timeLeft)}`;
   }, 1000);
 }
 function stopTimer() {
@@ -266,7 +380,7 @@ function stopTimer() {
   timerId = null;
 }
 
-/* ✅ уход только hidden */
+/* вњ… СѓС…РѕРґ С‚РѕР»СЊРєРѕ hidden */
 async function registerHiddenLeave() {
   if (!testStarted || finished) return;
 
@@ -286,7 +400,7 @@ async function logBlurOnly() {
   await postEvent("blur", { fio, blurCount, hiddenCount, leaveCount });
 }
 
-/* ------------------ 🎉 Confetti ------------------ */
+/* ------------------ рџЋ‰ Confetti ------------------ */
 
 let confettiRaf = null;
 
@@ -368,7 +482,7 @@ function runConfetti(ms = 1800) {
   confettiRaf = requestAnimationFrame(tick);
 }
 
-/* ------------------ Навигация ------------------ */
+/* ------------------ РќР°РІРёРіР°С†РёСЏ ------------------ */
 
 function showScreen(which) {
   const screens = ["homeScreen", "startScreen", "rulesScreen", "testScreen", "resultScreen"];
@@ -406,7 +520,7 @@ async function beginTest() {
   await ensureSid();
   if (!sid) return showModal("Ошибка", "Не удалось создать сеанс. Откройте тест через кнопку в боте.");
 
-  questions = pickTestQuestions(allQuestions, QUESTIONS_PER_TEST);
+  questions = pickBalancedQuestions(allQuestions, QUESTIONS_PER_TEST);
   sessionStorage.setItem("activeQuestions", JSON.stringify(questions));
 
   showScreen("testScreen");
@@ -420,9 +534,11 @@ async function beginTest() {
   testStarted = true;
   finished = false;
   startedAt = Date.now();
+  watermarkStamp = new Date(startedAt).toISOString().slice(0, 16).replace("T", " ");
 
   $("metaPill").textContent = `ИСМП • ${questions.length} вопросов`;
 
+  renderWatermark();
   renderQuestions();
   startTimer();
 
@@ -445,7 +561,7 @@ async function requestRetake() {
   if (!lastResult?.sid || !sid) return;
 
   btn.disabled = true;
-  btn.textContent = "⏳ Отправляем запрос…";
+  btn.textContent = "⏳ Отправляем запрос...";
 
   const resp = await postJSON("/api/retake-request", {
     sid,
@@ -457,11 +573,11 @@ async function requestRetake() {
 
   if (resp?.ok) {
     btn.textContent = "✅ Запрос отправлен";
-    showModal("Запрос отправлен", "Экзаменатор получит запрос на пересдачу. Если пересдача будет одобрена — вам придёт новая кнопка в чате.", "Ок");
+    showModal("Запрос отправлен", "Экзаменатор получит запрос на пересдачу. Если пересдача будет одобрена, вам придет новая кнопка в чате.", "Ок");
   } else {
     btn.disabled = false;
     btn.textContent = "📩 Запросить пересдачу";
-    showModal("Ошибка", "Не удалось отправить запрос на пересдачу. Попробуйте ещё раз.", "Ок");
+    showModal("Ошибка", "Не удалось отправить запрос на пересдачу. Попробуйте еще раз.", "Ок");
   }
 }
 
@@ -470,6 +586,7 @@ async function finishTest({ reason = "manual" } = {}) {
 
   finished = true;
   stopTimer();
+  hideWatermark();
 
   const answers = getAnswersMap();
   const score = calcScore(answers);
@@ -494,7 +611,6 @@ async function finishTest({ reason = "manual" } = {}) {
 
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
 
-  // всегда минимально: заголовок + sub + (уточка если успех) + результат
   const titleEl = $("resultTitle");
   const subEl = $("resultSubtitle");
   const mascot = $("mascotWrap");
@@ -508,21 +624,19 @@ async function finishTest({ reason = "manual" } = {}) {
     mascot.style.display = "block";
     $("retakeBtn").style.display = "none";
   } else {
-    // не сдал: тоже красиво и коротко
     if (reason === "too_many_violations") {
-      titleEl.textContent = "🚨 Экзамен завершён автоматически";
+      titleEl.textContent = "🚨 Экзамен завершен автоматически";
       subEl.textContent = "Выходы из теста зафиксированы.";
     } else if (reason === "time_up") {
       titleEl.textContent = "❌ Экзамен не сдан";
       subEl.textContent = "Время истекло.";
     } else {
       titleEl.textContent = "❌ Экзамен не сдан";
-      subEl.textContent = "Попробуйте ещё раз. 💪";
+      subEl.textContent = "Попробуйте еще раз.";
     }
 
     mascot.style.display = "none";
 
-    // кнопка пересдачи — только если НЕ сдал и НЕ нарушения
     const retakeBtn = $("retakeBtn");
     if (reason !== "too_many_violations") {
       retakeBtn.style.display = "block";
@@ -536,7 +650,7 @@ async function finishTest({ reason = "manual" } = {}) {
   lastResult = { sid, fio, score, total, reason, passed, pct };
 }
 
-/* анти-чит */
+/* Р°РЅС‚Рё-С‡РёС‚ */
 document.addEventListener("visibilitychange", () => {
   if (!testStarted || finished) return;
 
@@ -559,7 +673,12 @@ window.addEventListener("blur", () => {
   logBlurOnly();
 });
 
-/* кнопки */
+window.addEventListener("resize", () => {
+  if (!testStarted || finished) return;
+  renderWatermark();
+});
+
+/* Buttons */
 $("btnStudents").addEventListener("click", () => goStudentStart());
 $("btnResidents").addEventListener("click", () => showModal("Скоро", "Раздел для ординаторов в разработке.", "Ок"));
 $("btnStaff").addEventListener("click", () => showModal("Скоро", "Раздел для сотрудников центра в разработке.", "Ок"));
@@ -569,7 +688,17 @@ $("startBtn").addEventListener("click", goRules);
 $("rulesAgreeBtn").addEventListener("click", beginTest);
 $("rulesBackBtn").addEventListener("click", () => showScreen("startScreen"));
 
-$("finishBtn").addEventListener("click", () => finishTest({ reason: "manual" }));
+$("finishBtn").addEventListener("click", async () => {
+  if (!testStarted || finished) return;
+  const ok = await confirmModal(
+    "Подтверждение",
+    "Вы точно хотите завершить тест? После этого ответы изменить нельзя.",
+    "Да, завершить",
+    "Отмена"
+  );
+  if (!ok) return;
+  finishTest({ reason: "manual" });
+});
 
 $("closeBtn").addEventListener("click", () => tg?.close?.());
 $("resultCloseBtn").addEventListener("click", () => tg?.close?.());
@@ -588,3 +717,6 @@ $("retakeBtn").addEventListener("click", requestRetake);
 
   showScreen("homeScreen");
 })();
+
+
+

@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Тест по ИСМП</title>
+  <title>РўРµСЃС‚ РїРѕ РРЎРњРџ</title>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -138,7 +138,7 @@
       line-height: 1.35;
     }
 
-    /* предупреждение при возврате */
+    /* РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёРµ РїСЂРё РІРѕР·РІСЂР°С‚Рµ */
     .warn {
       position: fixed;
       left: 16px;
@@ -164,7 +164,7 @@
       opacity: 0.85;
     }
 
-    /* ✅ модал (вместо alert) */
+    /* вњ… РјРѕРґР°Р» (РІРјРµСЃС‚Рѕ alert) */
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -189,6 +189,35 @@
 
     .modal h2 { margin: 0 0 10px 0; font-size: 18px; }
     .modal p  { margin: 0 0 14px 0; color: #333; line-height: 1.35; }
+    #testScreen {
+      position: relative;
+      overflow: hidden;
+    }
+    #testScreen > :not(.watermark-layer) {
+      position: relative;
+      z-index: 2;
+    }
+    .watermark-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+      display: none;
+    }
+    .watermark-layer.active {
+      display: block;
+    }
+    .watermark-item {
+      position: absolute;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      color: rgba(0, 0, 0, 0.15);
+      transform: rotate(-22deg);
+      user-select: none;
+    }
   </style>
 </head>
 <body>
@@ -197,36 +226,38 @@
 
   <div class="modal-backdrop" id="modalBackdrop">
     <div class="modal">
-      <h2 id="modalTitle">Сообщение</h2>
+      <h2 id="modalTitle">РЎРѕРѕР±С‰РµРЅРёРµ</h2>
       <p id="modalText"></p>
       <button id="modalBtn">Понятно</button>
+      <button class="secondary" id="modalCancel" style="display:none;">Отмена</button>
     </div>
   </div>
 
   <div class="card" id="startScreen">
-    <h1>Тест по ИСМП</h1>
+    <h1>РўРµСЃС‚ РїРѕ РРЎРњРџ</h1>
 
-    <label for="fio">ФИО</label>
-    <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
+    <label for="fio">Р¤РРћ</label>
+    <input id="fio" type="text" placeholder="РРІР°РЅРѕРІ РРІР°РЅ РРІР°РЅРѕРІРёС‡" autocomplete="name" />
 
-    <button id="startBtn">Начать тест</button>
+    <button id="startBtn">РќР°С‡Р°С‚СЊ С‚РµСЃС‚</button>
 
     <p class="hint">
-      ⚠️ Экзаменационный режим: сворачивания/переключения фиксируются и отправляются экзаменатору.<br>
-      При 3-м уходе тест завершится автоматически.
+      вљ пёЏ Р­РєР·Р°РјРµРЅР°С†РёРѕРЅРЅС‹Р№ СЂРµР¶РёРј: СЃРІРѕСЂР°С‡РёРІР°РЅРёСЏ/РїРµСЂРµРєР»СЋС‡РµРЅРёСЏ С„РёРєСЃРёСЂСѓСЋС‚СЃСЏ Рё РѕС‚РїСЂР°РІР»СЏСЋС‚СЃСЏ СЌРєР·Р°РјРµРЅР°С‚РѕСЂСѓ.<br>
+      РџСЂРё 3-Рј СѓС…РѕРґРµ С‚РµСЃС‚ Р·Р°РІРµСЂС€РёС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.
     </p>
   </div>
 
   <div class="card" id="testScreen" style="display:none;">
+    <div class="watermark-layer" id="watermarkLayer" aria-hidden="true"></div>
     <div class="row">
-      <div class="pill" id="timerPill">⏱ 05:00</div>
-      <div class="pill">ИСМП • 5 вопросов</div>
+      <div class="pill" id="timerPill">вЏ± 10:00</div>
+      <div class="pill">РРЎРњРџ вЂў 5 РІРѕРїСЂРѕСЃРѕРІ</div>
     </div>
 
     <div id="questions"></div>
 
-    <button id="finishBtn">Завершить тест</button>
-    <button class="secondary" id="closeBtn" style="display:none;">Закрыть</button>
+    <button id="finishBtn">Р—Р°РІРµСЂС€РёС‚СЊ С‚РµСЃС‚</button>
+    <button class="secondary" id="closeBtn" style="display:none;">Р—Р°РєСЂС‹С‚СЊ</button>
 
     <div class="muted" id="note"></div>
   </div>
@@ -234,3 +265,5 @@
   <script src="app.js"></script>
 </body>
 </html>
+
+

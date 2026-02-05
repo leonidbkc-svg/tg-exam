@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Платформа тестирования</title>
+  <title>РџР»Р°С‚С„РѕСЂРјР° С‚РµСЃС‚РёСЂРѕРІР°РЅРёСЏ</title>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -184,7 +184,7 @@
     .modal h2 { margin: 0 0 10px 0; font-size: 18px; }
     .modal p  { margin: 0 0 14px 0; color: #333; line-height: 1.35; }
 
-    /* 🎉 confetti overlay */
+    /* рџЋ‰ confetti overlay */
     #confettiCanvas {
       position: fixed;
       inset: 0;
@@ -193,7 +193,7 @@
       display: none;
     }
 
-    /* 🐥 милый маскот-анимация (успех) */
+    /* рџђҐ РјРёР»С‹Р№ РјР°СЃРєРѕС‚-Р°РЅРёРјР°С†РёСЏ (СѓСЃРїРµС…) */
     .mascot {
       display: inline-block;
       transform-origin: 50% 90%;
@@ -215,7 +215,7 @@
       50%      { opacity: 1;    transform: scale(1.25); }
     }
 
-    /* 🦆 “страшно-милый” оверлей возврата */
+    /* рџ¦† вЂњСЃС‚СЂР°С€РЅРѕ-РјРёР»С‹Р№вЂќ РѕРІРµСЂР»РµР№ РІРѕР·РІСЂР°С‚Р° */
     .overlay-backdrop {
       position: fixed;
       inset: 0;
@@ -266,7 +266,7 @@
       70%      { transform: translateY(0) rotate(2deg); }
     }
 
-    /* ✅ красивый блок результата */
+    /* вњ… РєСЂР°СЃРёРІС‹Р№ Р±Р»РѕРє СЂРµР·СѓР»СЊС‚Р°С‚Р° */
     .resultBox {
       text-align: center;
       margin-top: 6px;
@@ -277,6 +277,35 @@
       font-weight: 900;
       color: #111;
     }
+    #testScreen {
+      position: relative;
+      overflow: hidden;
+    }
+    #testScreen > :not(.watermark-layer) {
+      position: relative;
+      z-index: 2;
+    }
+    .watermark-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+      display: none;
+    }
+    .watermark-layer.active {
+      display: block;
+    }
+    .watermark-item {
+      position: absolute;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      color: rgba(0, 0, 0, 0.15);
+      transform: rotate(-22deg);
+      user-select: none;
+    }
   </style>
 </head>
 
@@ -285,7 +314,7 @@
 
   <div class="warn" id="warnBox"></div>
 
-  <!-- ✅ Оверлей возврата -->
+  <!-- вњ… РћРІРµСЂР»РµР№ РІРѕР·РІСЂР°С‚Р° -->
   <div class="overlay-backdrop" id="returnBackdrop">
     <div class="overlay-card">
       <div class="spooky-duck">
@@ -304,7 +333,7 @@
         </svg>
       </div>
 
-      <div class="overlay-title" id="returnTitle">Выход из теста зафиксирован</div>
+      <div class="overlay-title" id="returnTitle">Р’С‹С…РѕРґ РёР· С‚РµСЃС‚Р° Р·Р°С„РёРєСЃРёСЂРѕРІР°РЅ</div>
       <p class="overlay-text" id="returnText"></p>
     </div>
   </div>
@@ -314,69 +343,71 @@
       <h2 id="modalTitle">Сообщение</h2>
       <p id="modalText"></p>
       <button id="modalBtn">Понятно</button>
+      <button class="secondary" id="modalCancel" style="display:none;">Отмена</button>
     </div>
   </div>
 
-  <!-- ✅ Экран выбора -->
+  <!-- вњ… Р­РєСЂР°РЅ РІС‹Р±РѕСЂР° -->
   <div class="card" id="homeScreen">
-    <h1>Платформа тестирования</h1>
+    <h1>РџР»Р°С‚С„РѕСЂРјР° С‚РµСЃС‚РёСЂРѕРІР°РЅРёСЏ</h1>
     <p class="sub">
-      Добро пожаловать на платформу тестирования отделения эпидемиологического надзора.<br>
-      Выберите раздел:
+      Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РЅР° РїР»Р°С‚С„РѕСЂРјСѓ С‚РµСЃС‚РёСЂРѕРІР°РЅРёСЏ РѕС‚РґРµР»РµРЅРёСЏ СЌРїРёРґРµРјРёРѕР»РѕРіРёС‡РµСЃРєРѕРіРѕ РЅР°РґР·РѕСЂР°.<br>
+      Р’С‹Р±РµСЂРёС‚Рµ СЂР°Р·РґРµР»:
     </p>
 
-    <button id="btnStudents">👩‍🎓 Тесты для студентов</button>
-    <button class="secondary" id="btnResidents">👨‍⚕️ Для ординаторов (скоро)</button>
-    <button class="secondary" id="btnStaff">🏥 Для сотрудников центра (скоро)</button>
+    <button id="btnStudents">РЎРѕС‚СЂСѓРґРЅРёРє Р¦РµРЅС‚СЂР°</button>
+    <button class="secondary" id="btnResidents">РћСЂРґРёРЅР°С‚РѕСЂ</button>
+    <button class="secondary" id="btnStaff">РЎС‚СѓРґРµРЅС‚</button>
   </div>
 
-  <!-- Экран ввода ФИО -->
+  <!-- Р­РєСЂР°РЅ РІРІРѕРґР° Р¤РРћ -->
   <div class="card" id="startScreen" style="display:none;">
-    <h1>Тест по ИСМП</h1>
+    <h1>РўРµСЃС‚ РїРѕ РРЎРњРџ</h1>
 
-    <label for="fio">ФИО</label>
-    <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
+    <label for="fio">Р¤РРћ</label>
+    <input id="fio" type="text" placeholder="РРІР°РЅРѕРІ РРІР°РЅ РРІР°РЅРѕРІРёС‡" autocomplete="name" />
 
-    <button id="startBtn">Продолжить</button>
-    <button class="secondary" id="backHomeBtn">⬅️ Назад</button>
+    <button id="startBtn">РџСЂРѕРґРѕР»Р¶РёС‚СЊ</button>
+    <button class="secondary" id="backHomeBtn">в¬…пёЏ РќР°Р·Р°Рґ</button>
   </div>
 
-  <!-- ✅ Экран правил -->
+  <!-- вњ… Р­РєСЂР°РЅ РїСЂР°РІРёР» -->
   <div class="card" id="rulesScreen" style="display:none;">
-    <h1>Правила экзамена</h1>
-    <p class="sub">Перед началом ознакомьтесь с правилами:</p>
+    <h1>РџСЂР°РІРёР»Р° СЌРєР·Р°РјРµРЅР°</h1>
+    <p class="sub">РџРµСЂРµРґ РЅР°С‡Р°Р»РѕРј РѕР·РЅР°РєРѕРјСЊС‚РµСЃСЊ СЃ РїСЂР°РІРёР»Р°РјРё:</p>
 
     <div class="muted" style="font-size:14px;color:#333;line-height:1.45;">
-      <div>⏱ Время: <b>5 минут</b></div>
-      <div>🧾 Вопросов: <b>10</b></div>
-      <div>✅ Порог сдачи: <b>70%</b></div>
-      <div>🎯 Минимум: <b><span id="passNeed">7</span></b> правильных</div>
-      <div>🚫 <b>3 ухода</b> из приложения → тест завершится автоматически</div>
-      <div style="margin-top:10px;">📵 Не сворачивайте Telegram во время теста.</div>
+      <div>вЏ± Р’СЂРµРјСЏ: <b>10  РјРёРЅСѓС‚</b></div>
+      <div>рџ§ѕ Р’РѕРїСЂРѕСЃРѕРІ: <b>15</b></div>
+      <div>вњ… РџРѕСЂРѕРі СЃРґР°С‡Рё: <b>70%</b></div>
+      <div>рџЋЇ РњРёРЅРёРјСѓРј: <b><span id="passNeed">11</span></b> РїСЂР°РІРёР»СЊРЅС‹С…</div>
+      <div>рџљ« <b>3 СѓС…РѕРґР°</b> РёР· РїСЂРёР»РѕР¶РµРЅРёСЏ в†’ С‚РµСЃС‚ Р·Р°РІРµСЂС€РёС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё</div>
+      <div style="margin-top:10px;">рџ“µ РќРµ СЃРІРѕСЂР°С‡РёРІР°Р№С‚Рµ Telegram РІРѕ РІСЂРµРјСЏ С‚РµСЃС‚Р°.</div>
     </div>
 
-    <button id="rulesAgreeBtn">✅ Я ознакомился(ась), начать</button>
-    <button class="secondary" id="rulesBackBtn">⬅️ Назад</button>
+    <button id="rulesAgreeBtn">вњ… РЇ РѕР·РЅР°РєРѕРјРёР»СЃСЏ(Р°СЃСЊ), РЅР°С‡Р°С‚СЊ</button>
+    <button class="secondary" id="rulesBackBtn">в¬…пёЏ РќР°Р·Р°Рґ</button>
   </div>
 
-  <!-- Экран теста -->
+  <!-- Р­РєСЂР°РЅ С‚РµСЃС‚Р° -->
   <div class="card" id="testScreen" style="display:none;">
+    <div class="watermark-layer" id="watermarkLayer" aria-hidden="true"></div>
     <div class="row">
-      <div class="pill" id="timerPill">⏱ 05:00</div>
-      <div class="pill" id="metaPill">ИСМП • 10 вопросов</div>
+      <div class="pill" id="timerPill">⏱ 10:00</div>
+      <div class="pill" id="metaPill">РРЎРњРџ вЂў 10 РІРѕРїСЂРѕСЃРѕРІ</div>
     </div>
 
     <div id="questions"></div>
 
-    <button id="finishBtn">Завершить тест</button>
-    <button class="secondary" id="closeBtn" style="display:none;">Закрыть</button>
+    <button id="finishBtn">Р—Р°РІРµСЂС€РёС‚СЊ С‚РµСЃС‚</button>
+    <button class="secondary" id="closeBtn" style="display:none;">Р—Р°РєСЂС‹С‚СЊ</button>
     <div class="muted" id="note"></div>
   </div>
 
-  <!-- ✅ Экран результата -->
+  <!-- вњ… Р­РєСЂР°РЅ СЂРµР·СѓР»СЊС‚Р°С‚Р° -->
   <div class="card" id="resultScreen" style="display:none;">
     <div class="resultBox">
-      <h1 id="resultTitle">Результат</h1>
+      <h1 id="resultTitle">Р РµР·СѓР»СЊС‚Р°С‚</h1>
       <p class="sub" id="resultSubtitle"></p>
 
       <div id="mascotWrap" style="display:none; margin: 8px 0 8px 0;">
@@ -400,17 +431,19 @@
         </div>
       </div>
 
-      <div class="scoreText" id="resultScore">—</div>
+      <div class="scoreText" id="resultScore">вЂ”</div>
     </div>
 
-    <button class="secondary" id="retakeBtn" style="display:none;">📩 Запросить пересдачу</button>
-    <button id="resultCloseBtn">Закрыть</button>
+    <button class="secondary" id="retakeBtn" style="display:none;">рџ“© Р—Р°РїСЂРѕСЃРёС‚СЊ РїРµСЂРµСЃРґР°С‡Сѓ</button>
+    <button id="resultCloseBtn">Р—Р°РєСЂС‹С‚СЊ</button>
 
-    <!-- скрыто навсегда -->
+    <!-- СЃРєСЂС‹С‚Рѕ РЅР°РІСЃРµРіРґР° -->
     <div class="muted" id="resultPill" style="display:none;"></div>
     <div class="muted" id="resultMeta" style="display:none;"></div>
   </div>
 
-  <script src="app.js?v=31"></script>
+  <script src="app.js?v=33"></script>
 </body>
 </html>
+
+
