@@ -362,17 +362,17 @@ function calcScore(answersMap) {
 }
 
 function startTimer() {
-  $("timerPill").textContent = `вЏ± ${formatTime(timeLeft)}`;
+  $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
   timerId = setInterval(() => {
     if (finished) return;
     timeLeft -= 1;
     if (timeLeft <= 0) {
       timeLeft = 0;
-      $("timerPill").textContent = `вЏ± 00:00`;
+      $("timerPill").textContent = `⏱ 00:00`;
       finishTest({ reason: "time_up" });
       return;
     }
-    $("timerPill").textContent = `вЏ± ${formatTime(timeLeft)}`;
+    $("timerPill").textContent = `⏱ ${formatTime(timeLeft)}`;
   }, 1000);
 }
 function stopTimer() {
