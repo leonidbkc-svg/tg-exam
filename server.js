@@ -182,6 +182,26 @@ function safeBool(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
 
+function normalizeAnswers(b) {
+  if (!b) return [];
+  let answers = b.answers;
+  if (typeof answers === "string") {
+    try { answers = JSON.parse(answers); } catch {}
+  }
+  if (!Array.isArray(answers) && b.answers_json) {
+    try {
+      const parsed = typeof b.answers_json === "string" ? JSON.parse(b.answers_json) : b.answers_json;
+      if (Array.isArray(parsed)) answers = parsed;
+      if (parsed && Array.isArray(parsed.answers)) answers = parsed.answers;
+    } catch {}
+  }
+  if (!Array.isArray(answers) && b.payload && Array.isArray(b.payload.answers)) {
+    answers = b.payload.answers;
+  }
+  if (!Array.isArray(answers)) answers = [];
+  return answers;
+}
+
 // ----------------- Telegram HTTP helper (NO fetch, pure https) -----------------
 function tgRequestJson({ method = "GET", path: reqPath, bodyObj = null }) {
   return new Promise((resolve, reject) => {
@@ -441,6 +461,8 @@ app.post("/api/submit", async (req, res) => {
     const sid = String(b.sid || "").trim();
     if (!sid) return res.status(400).json({ ok: false, error: "sid_required" });
 
+    console.log("SUBMIT answers:", Array.isArray(b.answers), typeof b.answers, b.answers?.length);
+
     const fio = String(b.fio || "").trim().slice(0, 160);
     const score = Number.isFinite(+b.score) ? +b.score : 0;
     const total = Number.isFinite(+b.total) ? +b.total : 0;
@@ -476,6 +498,8 @@ app.post("/api/submit", async (req, res) => {
       ? false
       : (maxScore > 0 ? (score / maxScore) >= 0.7 : false);
 
+    const answers = normalizeAnswers(b);
+
     const row = {
       id: uid("res_"),
       ts: Date.now(),
@@ -496,7 +520,7 @@ app.post("/api/submit", async (req, res) => {
 
       duration_sec: spentSec,
 
-      answers: [],
+      answers,
 
       meta: {
         sid,
@@ -564,6 +588,8 @@ app.post("/api/results", requireIngestKey, (req, res) => {
     const maxScore = Number.isFinite(+b.max_score) ? +b.max_score : 0;
     const percent = maxScore > 0 ? Math.round((score / maxScore) * 1000) / 10 : 0;
 
+    const answers = normalizeAnswers(b);
+
     const row = {
       id: uid("res_"),
       ts: Date.now(),
@@ -584,7 +610,7 @@ app.post("/api/results", requireIngestKey, (req, res) => {
 
       duration_sec: Number.isFinite(+b.duration_sec) ? +b.duration_sec : null,
 
-      answers: Array.isArray(b.answers) ? b.answers : [],
+      answers,
       meta: b.meta && typeof b.meta === "object" ? b.meta : {},
     };
 
